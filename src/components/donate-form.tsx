@@ -17,6 +17,7 @@ import { Loader2, Upload, Sparkles, AlertTriangle } from 'lucide-react';
 import Image from 'next/image';
 import { Badge } from './ui/badge';
 import { Alert, AlertDescription } from './ui/alert';
+import { supabase } from "@/lib/supabaseClient";
 
 const formSchema = z.object({
   foodName: z.string().min(3, 'Food name must be at least 3 characters.'),
@@ -24,6 +25,7 @@ const formSchema = z.object({
   expiryDate: z.string().refine(val => !isNaN(Date.parse(val)), { message: 'Invalid date' }),
   location: z.string().min(5, 'Location must be at least 5 characters.'),
   photo: z.any().refine(file => file?.[0], 'A photo is required.'),
+  description: z.string().min(5, 'Description must be at least 5 characters.') // ✅ NEW
 });
 
 type FormValues = z.infer<typeof formSchema>;
@@ -44,6 +46,7 @@ export function DonateForm() {
       foodName: '',
       quantity: 1,
       location: '',
+      description: '' // ✅ NEW
     },
   });
 
@@ -76,20 +79,42 @@ export function DonateForm() {
     }
   };
 
-  const onSubmit = (values: FormValues) => {
+  const onSubmit = async (values: FormValues) => {
     if (!photoPreview) {
       toast({ title: "Photo missing", description: "Please upload a photo of the food.", variant: 'destructive'});
       return;
     }
     setIsSubmitting(true);
-    addDonation({
-      foodName: values.foodName,
-      quantity: values.quantity,
-      expiryTime: new Date(values.expiryDate),
-      location: values.location,
-      photoUrl: photoPreview,
-      tags: aiTags,
-    });
+
+    const user = (await supabase.auth.getUser()).data.user;
+    if (!user) {
+      setIsSubmitting(false);
+      toast({ title: "Not logged in", description: "Please login to donate.", variant: 'destructive'});
+      return;
+    }
+
+    const { error } = await supabase.from("food_listings").insert([
+      {
+        food_name: values.foodName,
+        quantity: values.quantity,
+        expiry_date: values.expiryDate,
+        location: values.location,
+        description: values.description, // ✅ NEW
+        photo_url: photoPreview,
+        tags: aiTags,
+        donor_id: user.id,
+        taken: false,
+        taken_by: null,
+      }
+    ]);
+
+    setIsSubmitting(false);
+
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: 'destructive'});
+      return;
+    }
+
     toast({ title: "Donation Submitted!", description: "Thank you for your generosity. Your donation is now pending." });
     router.push('/donor');
   };
@@ -102,6 +127,7 @@ export function DonateForm() {
       </CardHeader>
       <CardContent>
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+          {/* Photo Upload */}
           <div className="space-y-2">
             <Label htmlFor="photo">Food Photo</Label>
             <div className="relative">
@@ -130,6 +156,7 @@ export function DonateForm() {
               </Alert>
           )}
 
+          {/* Food Name */}
           <div className="space-y-2">
             <Label htmlFor="foodName">Food Name</Label>
             <div className="relative">
@@ -144,6 +171,7 @@ export function DonateForm() {
             {form.formState.errors.foodName && <p className="text-sm text-destructive">{form.formState.errors.foodName.message}</p>}
           </div>
 
+          {/* Quantity + Expiry Date */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
              <div className="space-y-2">
               <Label htmlFor="quantity">Quantity (serves how many?)</Label>
@@ -157,12 +185,29 @@ export function DonateForm() {
             </div>
           </div>
           
+          {/* Location */}
           <div className="space-y-2">
             <Label htmlFor="location">Your Location</Label>
             <Textarea id="location" {...form.register('location')} placeholder="e.g., 123 Main St, Anytown" />
             {form.formState.errors.location && <p className="text-sm text-destructive">{form.formState.errors.location.message}</p>}
           </div>
 
+          {/* ✅ New Description Field */}
+          <div className="space-y-2">
+            <Label htmlFor="description">Food Description</Label>
+            <Textarea
+              id="description"
+              {...form.register('description')}
+              placeholder="e.g., Homemade vegetarian curry with mild spices"
+            />
+            {form.formState.errors.description && (
+              <p className="text-sm text-destructive">
+                {form.formState.errors.description.message}
+              </p>
+            )}
+          </div>
+
+          {/* Submit */}
           <Button type="submit" className="w-full" disabled={isSubmitting || isCategorizing}>
             {isSubmitting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Submitting...</> : "Submit Donation"}
           </Button>
