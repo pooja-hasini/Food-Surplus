@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -12,141 +13,220 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Menu, Home, ShoppingBag, LogOut, X, MessageSquare } from "lucide-react";
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+
+type View = 'home' | 'taken' | 'detail';
 
 export default function ReceiverDashboard() {
-  const [listings, setListings] = useState<any[]>([]);
+  const [availableListings, setAvailableListings] = useState<any[]>([]);
+  const [takenListings, setTakenListings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [currentView, setCurrentView] = useState<View>('home');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  
   const [selectedListing, setSelectedListing] = useState<any | null>(null);
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+
   const router = useRouter();
 
-  useEffect(() => {
-    const fetchListings = async () => {
-      setLoading(true);
-      const { data } = await supabase
-        .from("food_listings")
-        .select("*")
-        .eq("taken", false)
-        .order("created_at", { ascending: false });
-      setListings(data || []);
-      setLoading(false);
-    };
-    fetchListings();
-  }, []);
+  const fetchAvailableListings = async () => {
+    setLoading(true);
+    const { data } = await supabase
+      .from("food_listings")
+      .select("*")
+      .eq("taken", false)
+      .order("created_at", { ascending: false });
+    setAvailableListings(data || []);
+    setLoading(false);
+  };
 
-  const handleAccept = async (listingId: string) => {
+  const fetchTakenListings = async () => {
+    setLoading(true);
+    const user = (await supabase.auth.getUser()).data.user;
+    if (!user) {
+      setLoading(false);
+      return;
+    }
+    const { data } = await supabase
+      .from("food_listings")
+      .select("*") 
+      .eq("taken", true)
+      .eq("taken_by", user.id)
+      .order("created_at", { ascending: false });
+    setTakenListings(data || []);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    if (currentView === 'home') {
+      fetchAvailableListings();
+    } else if (currentView === 'taken') {
+      fetchTakenListings();
+    }
+  }, [currentView]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/');
+  };
+
+  const handleAcceptConfirm = async () => {
+    if (!selectedListing) return;
     const user = (await supabase.auth.getUser()).data.user;
     if (!user) return alert("Not logged in");
 
     const { error } = await supabase
       .from("food_listings")
       .update({ taken: true, taken_by: user.id })
-      .eq("id", listingId);
+      .eq("id", selectedListing.id);
 
-    if (error) return alert(error.message);
+    if (error) {
+      alert(error.message);
+    } else {
+      setShowConfirmDialog(false);
+      setSelectedListing(null);
+      setCurrentView('taken');
+    }
+  };
 
-    setListings(listings.filter(l => l.id !== listingId));
+  const navigateToView = (view: View) => {
+    setCurrentView(view);
     setSelectedListing(null);
   };
 
-  return (
-    <div className="container py-8">
-      <h1 className="text-3xl font-bold mb-4">Available Food Donations</h1>
-      {loading ? (
-        <div>Loading...</div>
-      ) : listings.length === 0 ? (
-        <div>No food available right now.</div>
-      ) : (
-        <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {listings.map(listing => (
-            <div
-              key={listing.id}
-              className="border rounded-lg p-4 bg-card shadow-sm"
-            >
-              <h3 className="font-bold text-lg">
-                {listing.food_name || listing.title}
-              </h3>
+  const renderContent = () => {
+    if (loading) return <div className="text-center py-10">Loading...</div>;
 
+    if (currentView === 'detail' && selectedListing) {
+      return (
+        <div className="p-4 md:p-6">
+          <Button variant="outline" onClick={() => navigateToView('home')}>&larr; Back to list</Button>
+          <Card className="mt-4 max-w-2xl mx-auto">
+            <CardHeader>
+              <CardTitle className="text-2xl">{selectedListing.food_name}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {selectedListing.photo_url && (
+                <img src={selectedListing.photo_url} alt="Food" className="mb-4 max-h-80 w-full object-cover rounded-md" />
+              )}
+              <p className="text-lg mb-4">{selectedListing.description}</p>
+              <div className="grid grid-cols-2 gap-4 text-md">
+                <p><span className="font-semibold">Quantity:</span> {selectedListing.quantity}</p>
+                <p><span className="font-semibold">Location:</span> {selectedListing.location}</p>
+                <p><span className="font-semibold">Expiry Date:</span> {new Date(selectedListing.expiry_date).toLocaleDateString()}</p>
+              </div>
+            </CardContent>
+            <CardFooter>
+              <Button className="w-full" size="lg" onClick={() => setShowConfirmDialog(true)}>Accept This Item</Button>
+            </CardFooter>
+          </Card>
+        </div>
+      );
+    }
+
+    const listings = currentView === 'home' ? availableListings : takenListings;
+    const isEmpty = listings.length === 0;
+    const emptyMessage = currentView === 'home' 
+      ? "No food available right now. Check back later!" 
+      : "You have not accepted any food items yet.";
+
+    if (isEmpty) return <div className="text-center py-10">{emptyMessage}</div>;
+
+    return (
+      <div className="p-4 md:p-6 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {listings.map(listing => (
+          <Card key={listing.id} className="flex flex-col">
+            <CardHeader>
+              <CardTitle>{listing.food_name}</CardTitle>
+            </CardHeader>
+            <CardContent className="flex-grow">
               {listing.photo_url && (
-                <img
-                  src={listing.photo_url}
-                  alt="Food"
-                  className="my-2 max-h-40 w-full object-cover rounded"
-                />
-              )}
-
-              {listing.quantity && (
-                <p>
-                  <span className="font-semibold">Quantity:</span>{" "}
-                  {listing.quantity}
-                </p>
-              )}
-              {listing.expiry_date && (
-                <p>
-                  <span className="font-semibold">Expiry Date:</span>{" "}
-                  {new Date(listing.expiry_date).toLocaleDateString()}
-                </p>
-              )}
-              {listing.location && (
-                <p>
-                  <span className="font-semibold">Location:</span>{" "}
-                  {listing.location}
-                </p>
-              )}
-
-              {/* Toggle more details */}
-              {expanded === listing.id && (
-                <div className="mt-2 text-sm text-muted-foreground">
-                  <p>{listing.description}</p>
+                <div className="aspect-video w-full overflow-hidden rounded-md mb-4">
+                    <img src={listing.photo_url} alt={listing.food_name} className="h-full w-full object-cover" />
                 </div>
               )}
-              <button
-                className="mt-2 text-blue-600 text-sm underline"
-                onClick={() =>
-                  setExpanded(expanded === listing.id ? null : listing.id)
-                }
-              >
-                {expanded === listing.id ? "Hide details" : "More details"}
-              </button>
-
-              {/* Accept button */}
-              <button
-                className="mt-3 bg-green-500 text-white px-4 py-2 rounded w-full"
-                onClick={() => setSelectedListing(listing)}
-              >
-                Accept
-              </button>
-
-              {/* Confirmation Dialog */}
-              {selectedListing?.id === listing.id && (
-                <AlertDialog
-                  open
-                  onOpenChange={() => setSelectedListing(null)}
-                >
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Confirm Food Pickup</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        Would you like to take this food:{" "}
-                        <span className="font-semibold">{listing.food_name}</span>?
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel onClick={() => setSelectedListing(null)}>
-                        Cancel
-                      </AlertDialogCancel>
-                      <AlertDialogAction
-                        onClick={() => handleAccept(listing.id)}
-                      >
-                        Yes, Accept
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
+              <p className="text-sm text-muted-foreground mb-2 line-clamp-2 h-10">{listing.description}</p>
+              <div className="space-y-1 text-sm">
+                <p><span className="font-semibold">Quantity:</span> {listing.quantity}</p>
+                <p><span className="font-semibold">Expiry:</span> {new Date(listing.expiry_date).toLocaleDateString()}</p>
+                <p><span className="font-semibold">Location:</span> {listing.location}</p>
+              </div>
+              {listing.taken && <p className="font-bold text-red-600 mt-2">Status: Taken</p>}
+            </CardContent>
+            <CardFooter className="flex flex-col items-start gap-2 pt-4">
+              {currentView === 'home' ? (
+                <Button className="w-full" onClick={() => { setSelectedListing(listing); setCurrentView('detail'); }}>
+                  View & Accept
+                </Button>
+              ) : (
+                <div className="w-full flex flex-col gap-2">
+                  <Button className="w-full"><MessageSquare className="mr-2 h-4 w-4" /> Chat</Button>
+                  <Button className="w-full" variant="secondary">Complete</Button>
+                </div>
               )}
-            </div>
-          ))}
+            </CardFooter>
+          </Card>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex h-screen bg-background">
+      {/* Sidebar */}
+      <aside className={`bg-muted/50 border-r transition-all duration-300 ${sidebarOpen ? 'w-64' : 'w-0'} overflow-hidden h-full flex-shrink-0`}>
+        <div className="p-4">
+          <h2 className="text-xl font-bold mb-8 px-2">Menu</h2>
+          <nav className="flex flex-col gap-2">
+            <Button variant={currentView === 'home' ? 'secondary' : 'ghost'} className="justify-start" onClick={() => navigateToView('home')}>
+              <Home className="mr-2 h-5 w-5" /> Home
+            </Button>
+            <Button variant={currentView === 'taken' ? 'secondary' : 'ghost'} className="justify-start" onClick={() => navigateToView('taken')}>
+              <ShoppingBag className="mr-2 h-5 w-5" /> Taken Items
+            </Button>
+            <Button variant="ghost" className="w-full justify-start" onClick={handleLogout}>
+              <LogOut className="mr-2 h-5 w-5" /> Logout
+            </Button>
+          </nav>
         </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <main className="flex-1 flex flex-col overflow-hidden">
+        {/* Header */}
+        <header className="flex items-center p-4 border-b flex-shrink-0">
+          <Button variant="outline" size="icon" onClick={() => setSidebarOpen(!sidebarOpen)} className="mr-4">
+            {sidebarOpen ? <X /> : <Menu />}
+          </Button>
+          <h1 className="text-2xl font-bold tracking-tight">
+            {currentView === 'home' && 'Available Food'}
+            {currentView === 'taken' && 'Your Taken Items'}
+            {currentView === 'detail' && 'Item Details'}
+          </h1>
+        </header>
+        {/* Scrollable Content */}
+        <div className="flex-1 overflow-y-auto">
+          {renderContent()}
+        </div>
+      </main>
+
+      {/* Confirmation Dialog */}
+      {selectedListing && (
+        <AlertDialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Do you want to accept this food item: <span className="font-semibold">{selectedListing.food_name}</span>? This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={handleAcceptConfirm}>Yes, Accept</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       )}
     </div>
   );

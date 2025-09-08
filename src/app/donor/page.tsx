@@ -4,9 +4,10 @@ import Link from 'next/link';
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { Button } from '@/components/ui/button';
-import { PlusCircle, Info } from 'lucide-react';
+import { PlusCircle, Info, MessageSquare } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
+// --- Main Donor Page Component ---
 export default function DonorPage() {
   const [donations, setDonations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,42 +62,51 @@ export default function DonorPage() {
       ) : (
         <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {donations.map(donation => (
-            <div key={donation.id} className="border rounded-lg p-4 bg-card shadow-sm">
-
-              <h3 className="font-bold text-lg">{donation.food_name || donation.title}</h3>
-              <p>{donation.description}</p>
-              {donation.quantity && (
-                <p>
-                  <span className="font-semibold">Quantity:</span> {donation.quantity}
+            <div key={donation.id} className="border rounded-lg p-4 bg-card shadow-sm flex flex-col justify-between">
+              <div>
+                <h3 className="font-bold text-lg">{donation.food_name || donation.title}</h3>
+                <p>{donation.description}</p>
+                {donation.quantity && (
+                  <p>
+                    <span className="font-semibold">Quantity:</span> {donation.quantity}
+                  </p>
+                )}
+                {donation.expiry_date && (
+                  <p>
+                    <span className="font-semibold">Expiry Date:</span> {new Date(donation.expiry_date).toLocaleDateString()}
+                  </p>
+                )}
+                {donation.location && (
+                  <p>
+                    <span className="font-semibold">Location:</span> {donation.location}
+                  </p>
+                )}
+                {donation.photo_url && (
+                  <img
+                    src={donation.photo_url}
+                    alt="Food"
+                    className="my-2 max-h-40 rounded"
+                  />
+                )}
+                <p className="mt-2 text-sm">
+                  Status:{" "}
+                  <span className={donation.taken ? "text-red-600" : "text-yellow-600"}>
+                    {donation.taken ? "Taken" : "Pending"}
+                  </span>
                 </p>
+              </div>
+              {donation.taken && (
+                <div className="mt-4 flex flex-col gap-2">
+                  <Button>
+                    <MessageSquare className="mr-2 h-4 w-4" /> Chat
+                  </Button>
+                  <Button variant="secondary">Complete</Button>
+                </div>
               )}
-              {donation.expiry_date && (
-                <p>
-                  <span className="font-semibold">Expiry Date:</span> {new Date(donation.expiry_date).toLocaleDateString()}
-                </p>
-              )}
-              {donation.location && (
-                <p>
-                  <span className="font-semibold">Location:</span> {donation.location}
-                </p>
-              )}
-              {donation.photo_url && (
-                <img
-                  src={donation.photo_url}
-                  alt="Food"
-                  className="my-2 max-h-40 rounded"
-                />
-              )}
-              <p className="mt-2 text-sm">
-                Status:{" "}
-                <span className={donation.taken ? "text-red-600" : "text-yellow-600"}>
-                  {donation.taken ? "Taken" : "Pending"}
-                </span>
-              </p>
             </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          }
