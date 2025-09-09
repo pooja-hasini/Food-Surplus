@@ -32,38 +32,38 @@ export default function ReceiverDashboard() {
 
   const fetchAvailableListings = async () => {
     setLoading(true);
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("food_listings")
       .select("*")
       .eq("taken", false)
       .order("created_at", { ascending: false });
+
+    if (error) console.error(error);
     setAvailableListings(data || []);
     setLoading(false);
   };
 
   const fetchTakenListings = async () => {
     setLoading(true);
-    const user = (await supabase.auth.getUser()).data.user;
-    if (!user) {
-      setLoading(false);
-      return;
-    }
-    const { data } = await supabase
+    const { data: userData } = await supabase.auth.getUser();
+    const user = userData?.user;
+    if (!user) return setLoading(false);
+
+    const { data, error } = await supabase
       .from("food_listings")
-      .select("*") 
+      .select("*")
       .eq("taken", true)
       .eq("taken_by", user.id)
       .order("created_at", { ascending: false });
+
+    if (error) console.error(error);
     setTakenListings(data || []);
     setLoading(false);
   };
 
   useEffect(() => {
-    if (currentView === 'home') {
-      fetchAvailableListings();
-    } else if (currentView === 'taken') {
-      fetchTakenListings();
-    }
+    if (currentView === 'home') fetchAvailableListings();
+    else if (currentView === 'taken') fetchTakenListings();
   }, [currentView]);
 
   const handleLogout = async () => {
@@ -73,21 +73,28 @@ export default function ReceiverDashboard() {
 
   const handleAcceptConfirm = async () => {
     if (!selectedListing) return;
-    const user = (await supabase.auth.getUser()).data.user;
+    const { data: userData } = await supabase.auth.getUser();
+    const user = userData?.user;
     if (!user) return alert("Not logged in");
 
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("food_listings")
       .update({ taken: true, taken_by: user.id })
-      .eq("id", selectedListing.id);
+      .eq("id", selectedListing.id)
+      .select(); // important: returns updated row
 
     if (error) {
-      alert(error.message);
-    } else {
-      setShowConfirmDialog(false);
-      setSelectedListing(null);
-      setCurrentView('taken');
+      alert("Update failed: " + error.message);
+      return;
     }
+    else{
+      
+    setShowConfirmDialog(false);
+    setSelectedListing(null);
+    setCurrentView('taken');
+
+    }
+
   };
 
   const navigateToView = (view: View) => {
@@ -192,9 +199,8 @@ export default function ReceiverDashboard() {
         </div>
       </aside>
 
-      {/* Main Content Area */}
+      {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden">
-        {/* Header */}
         <header className="flex items-center p-4 border-b flex-shrink-0">
           <Button variant="outline" size="icon" onClick={() => setSidebarOpen(!sidebarOpen)} className="mr-4">
             {sidebarOpen ? <X /> : <Menu />}
@@ -205,13 +211,13 @@ export default function ReceiverDashboard() {
             {currentView === 'detail' && 'Item Details'}
           </h1>
         </header>
-        {/* Scrollable Content */}
+
         <div className="flex-1 overflow-y-auto">
           {renderContent()}
         </div>
       </main>
 
-      {/* Confirmation Dialog */}
+      {/* Confirm Dialog */}
       {selectedListing && (
         <AlertDialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
           <AlertDialogContent>

@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
-import { useDonations } from '@/context/DonationsContext';
 import { handleCategorize } from '@/actions/categorize';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -25,14 +24,13 @@ const formSchema = z.object({
   expiryDate: z.string().refine(val => !isNaN(Date.parse(val)), { message: 'Invalid date' }),
   location: z.string().min(5, 'Location must be at least 5 characters.'),
   photo: z.any().refine(file => file?.[0], 'A photo is required.'),
-  description: z.string().min(5, 'Description must be at least 5 characters.') // ✅ NEW
+  description: z.string().min(5, 'Description must be at least 5 characters.')
 });
 
 type FormValues = z.infer<typeof formSchema>;
 
 export function DonateForm() {
   const router = useRouter();
-  const { addDonation } = useDonations();
   const { toast } = useToast();
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [isCategorizing, setIsCategorizing] = useState(false);
@@ -46,9 +44,12 @@ export function DonateForm() {
       foodName: '',
       quantity: 1,
       location: '',
-      description: '' // ✅ NEW
+      description: ''
     },
   });
+
+  // Added today's date to restrict expiry date input min value
+  const today = new Date().toISOString().split('T')[0];
 
   const handlePhotoChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -70,7 +71,7 @@ export function DonateForm() {
             setAiTags(result.tags);
           }
         } catch (error) {
-           setAiError('An unexpected error occurred during categorization.');
+          setAiError('An unexpected error occurred during categorization.');
         } finally {
           setIsCategorizing(false);
         }
@@ -80,7 +81,8 @@ export function DonateForm() {
   };
 
   const onSubmit = async (values: FormValues) => {
-    if (!photoPreview) {
+    const photoFile = values.photo?.[0];
+    if (!photoFile) {
       toast({ title: "Photo missing", description: "Please upload a photo of the food.", variant: 'destructive'});
       return;
     }
@@ -93,28 +95,50 @@ export function DonateForm() {
       return;
     }
 
-    const { error } = await supabase.from("food_listings").insert([
-      {
+    let publicPhotoUrl = '';
+    try {
+      const fileExt = photoFile.name.split('.').pop();
+      const fileName = `${Date.now()}.${fileExt}`;
+      const filePath = `${user.id}/${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('food_photos')
+        .upload(filePath, photoFile);
+
+      if (uploadError) throw uploadError;
+
+      const { data: urlData } = supabase.storage.from('food_photos').getPublicUrl(filePath);
+      publicPhotoUrl = urlData.publicUrl;
+    } catch (error: any) {
+      setIsSubmitting(false);
+      toast({ title: "Photo Upload Failed", description: error.message, variant: 'destructive'});
+      return;
+    }
+
+    const { data: insertedRows, error: insertError } = await supabase
+      .from("food_listings")
+      .insert([{
         food_name: values.foodName,
         quantity: values.quantity,
         expiry_date: values.expiryDate,
         location: values.location,
-        description: values.description, // ✅ NEW
-        photo_url: photoPreview,
+        description: values.description,
+        photo_url: publicPhotoUrl,
         tags: aiTags,
         donor_id: user.id,
         taken: false,
         taken_by: null,
-      }
-    ]);
+      }])
+      .select(); // important to get the correct UUID
 
     setIsSubmitting(false);
 
-    if (error) {
-      toast({ title: "Error", description: error.message, variant: 'destructive'});
+    if (insertError || !insertedRows || insertedRows.length === 0) {
+      toast({ title: "Error", description: insertError?.message || "Unknown error", variant: 'destructive'});
       return;
     }
 
+    console.log("Inserted donation:", insertedRows[0]);
     toast({ title: "Donation Submitted!", description: "Thank you for your generosity. Your donation is now pending." });
     router.push('/donor');
   };
@@ -131,7 +155,14 @@ export function DonateForm() {
           <div className="space-y-2">
             <Label htmlFor="photo">Food Photo</Label>
             <div className="relative">
-              <Input id="photo" type="file" accept="image/*" {...form.register('photo')} onChange={handlePhotoChange} className="pr-12"/>
+              <Input 
+                id="photo" 
+                type="file" 
+                accept="image/*" 
+                {...form.register('photo')} 
+                onChange={handlePhotoChange} 
+                className="pr-12" 
+              />
               <Upload className="absolute right-4 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
             </div>
             {form.formState.errors.photo && <p className="text-sm text-destructive">{form.formState.errors.photo.message as string}</p>}
@@ -174,15 +205,20 @@ export function DonateForm() {
           {/* Quantity + Expiry Date */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
              <div className="space-y-2">
-              <Label htmlFor="quantity">Quantity (serves how many?)</Label>
-              <Input id="quantity" type="number" {...form.register('quantity')} placeholder="e.g., 5" />
-              {form.formState.errors.quantity && <p className="text-sm text-destructive">{form.formState.errors.quantity.message}</p>}
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="expiryDate">Expiry Date</Label>
-              <Input id="expiryDate" type="date" {...form.register('expiryDate')} />
-              {form.formState.errors.expiryDate && <p className="text-sm text-destructive">{form.formState.errors.expiryDate.message}</p>}
-            </div>
+               <Label htmlFor="quantity">Quantity (serves how many?)</Label>
+               <Input id="quantity" type="number" {...form.register('quantity')} placeholder="e.g., 5" />
+               {form.formState.errors.quantity && <p className="text-sm text-destructive">{form.formState.errors.quantity.message}</p>}
+             </div>
+             <div className="space-y-2">
+               <Label htmlFor="expiryDate">Expiry Date</Label>
+               <Input 
+                 id="expiryDate" 
+                 type="date" 
+                 {...form.register('expiryDate')} 
+                 min={today}  // <= Added this to restrict past dates
+               />
+               {form.formState.errors.expiryDate && <p className="text-sm text-destructive">{form.formState.errors.expiryDate.message}</p>}
+             </div>
           </div>
           
           {/* Location */}
@@ -192,7 +228,7 @@ export function DonateForm() {
             {form.formState.errors.location && <p className="text-sm text-destructive">{form.formState.errors.location.message}</p>}
           </div>
 
-          {/* ✅ New Description Field */}
+          {/* Description Field */}
           <div className="space-y-2">
             <Label htmlFor="description">Food Description</Label>
             <Textarea
@@ -201,9 +237,7 @@ export function DonateForm() {
               placeholder="e.g., Homemade vegetarian curry with mild spices"
             />
             {form.formState.errors.description && (
-              <p className="text-sm text-destructive">
-                {form.formState.errors.description.message}
-              </p>
+              <p className="text-sm text-destructive">{form.formState.errors.description.message}</p>
             )}
           </div>
 
