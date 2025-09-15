@@ -11,7 +11,9 @@ const initialDonations: Donation[] = [
     foodName: 'Fresh Apples',
     expiryTime: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), // 2 days from now
     quantity: 10,
-    location: 'Greenwood Park, 1520',
+  location: 'Greenwood Park, 1520',
+  latitude: 12.9716,
+  longitude: 77.5946,
     photoUrl: 'https://placehold.co/600x400.png',
     tags: ['fruit', 'fresh', 'healthy'],
     status: 'pending',
@@ -22,7 +24,9 @@ const initialDonations: Donation[] = [
     foodName: 'Homemade Bread Loaves',
     expiryTime: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000), // 1 day from now
     quantity: 5,
-    location: 'Sunnyvale Community Center',
+  location: 'Sunnyvale Community Center',
+  latitude: 12.9352,
+  longitude: 77.6245,
     photoUrl: 'https://placehold.co/600x400.png',
     tags: ['bakery', 'homemade', 'carbs'],
     status: 'pending',
@@ -33,7 +37,9 @@ const initialDonations: Donation[] = [
     foodName: 'Canned Vegetable Soup',
     expiryTime: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 1 month from now
     quantity: 20,
-    location: 'Maple Street Food Bank',
+  location: 'Maple Street Food Bank',
+  latitude: 12.9279,
+  longitude: 77.6271,
     photoUrl: 'https://placehold.co/600x400.png',
     tags: ['canned', 'soup', 'non-perishable'],
     status: 'taken',

@@ -24,11 +24,25 @@ export default function ReceiverDashboard() {
   const [loading, setLoading] = useState(true);
   const [currentView, setCurrentView] = useState<View>('home');
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  
   const [selectedListing, setSelectedListing] = useState<any | null>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [location, setLocation] = useState<{lat: number, lng: number} | null>(null);
+  const [locationError, setLocationError] = useState<string | null>(null);
 
   const router = useRouter();
+
+  // Haversine formula for distance in km
+  function getDistanceKm(lat1: number, lng1: number, lat2: number, lng2: number) {
+    const R = 6371; // Radius of earth in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
 
   const fetchAvailableListings = async () => {
     setLoading(true);
@@ -39,9 +53,35 @@ export default function ReceiverDashboard() {
       .order("created_at", { ascending: false });
 
     if (error) console.error(error);
-    setAvailableListings(data || []);
+    let filtered = data || [];
+    if (location) {
+      filtered = filtered.filter((listing: any) => {
+        if (!listing.latitude || !listing.longitude) return false;
+        const dist = getDistanceKm(location.lat, location.lng, listing.latitude, listing.longitude);
+        return dist <= 20;
+      });
+    }
+    setAvailableListings(filtered);
     setLoading(false);
   };
+  // Request location on mount
+  useEffect(() => {
+    if (!location) {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+            setLocationError(null);
+          },
+          (err) => {
+            setLocationError("Location access denied. Please enable location to view nearby donations.");
+          }
+        );
+      } else {
+        setLocationError("Geolocation is not supported by your browser.");
+      }
+    }
+  }, []);
 
   const fetchTakenListings = async () => {
     setLoading(true);
@@ -103,7 +143,9 @@ export default function ReceiverDashboard() {
   };
 
   const renderContent = () => {
-    if (loading) return <div className="text-center py-10">Loading...</div>;
+  if (loading) return <div className="text-center py-10">Loading...</div>;
+  if (locationError) return <div className="text-center py-10 text-red-600">{locationError}</div>;
+  if (!location) return <div className="text-center py-10">Please allow location access to view nearby donations.</div>;
 
     if (currentView === 'detail' && selectedListing) {
       return (

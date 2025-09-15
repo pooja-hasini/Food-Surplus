@@ -6,6 +6,8 @@ export interface Donation {
   expiryTime: Date;
   quantity: number; // For how many people
   location: string;
+  latitude: number;
+  longitude: number;
   photoUrl: string; // URL of the photo
   tags: string[];
   status: DonationStatus;
