@@ -28,6 +28,52 @@ export default function ReceiverDashboard() {
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [location, setLocation] = useState<{lat: number, lng: number} | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
+  const [address, setAddress] = useState<string | null>(null);
+  const [isStoredLocation, setIsStoredLocation] = useState<boolean>(false);
+
+  function extractShortAddress(reverseJson: any) {
+    if (!reverseJson) return null;
+    const raw = reverseJson.raw || reverseJson;
+    const addr = raw.address || null;
+    if (addr) {
+      const city = addr.city || addr.town || addr.village || addr.hamlet || addr.county || addr.state;
+      const state = addr.state || addr.region || addr.county;
+      if (city && state) return `${city}, ${state}`;
+      if (city) return city;
+      if (state) return state;
+    }
+    if (reverseJson.display_name) {
+      const parts = reverseJson.display_name.split(',').map((s: string) => s.trim());
+      return parts.slice(0, 2).join(', ');
+    }
+    return null;
+  }
+
+  // Ensure we attempt reverse-geocoding when location is present but address wasn't set
+  useEffect(() => {
+    if (!location || address) return;
+    (async () => {
+      try {
+        const apiRes = await fetch(`/api/reverse?lat=${location.lat}&lon=${location.lng}`);
+        if (apiRes.ok) {
+          const j = await apiRes.json();
+          const short = extractShortAddress(j);
+          if (short) {
+            setAddress(short);
+            return;
+          }
+          if (j.display_name) {
+            setAddress(j.display_name);
+            return;
+          }
+        } else {
+          console.error('reverse API failed', apiRes.status);
+        }
+      } catch (e) {
+        console.error('reverse API error', e);
+      }
+    })();
+  }, [location, address]);
 
   const router = useRouter();
 
@@ -66,20 +112,102 @@ export default function ReceiverDashboard() {
   };
   // Request location on mount
   useEffect(() => {
-    if (!location) {
+    async function handleLocation() {
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+          async (pos) => {
+            const lat = pos.coords.latitude;
+            const lng = pos.coords.longitude;
+            setLocation({ lat, lng });
+            setIsStoredLocation(false);
             setLocationError(null);
+
+            // Reverse-geocode to get human-readable address (using Nominatim)
+              try {
+                const apiRes = await fetch(`/api/reverse?lat=${lat}&lon=${lng}`);
+                if (apiRes.ok) {
+                  const j = await apiRes.json();
+                  console.debug('reverse api (live) response:', j);
+                  const short = extractShortAddress(j);
+                  if (short) {
+                    setAddress(short);
+                    console.debug('address set from live coords (short):', short);
+                  } else if (j.display_name) {
+                    const shortFallback = j.display_name.split(',').slice(0,2).join(', ');
+                    setAddress(shortFallback);
+                    console.debug('address set from live coords (display_name fallback):', shortFallback);
+                  }
+                }
+              } catch (e) { console.debug('reverse live error', e); }
+
+            // Save latest location to profiles table
+            const user = await supabase.auth.getUser();
+            if (user && user.data && user.data.user) {
+              const userId = user.data.user.id;
+              await supabase
+                .from('profiles')
+                .update({ latest_location: { lat, lng } })
+                .eq('id', userId);
+            }
           },
-          (err) => {
-            setLocationError("Location access denied. Please enable location to view nearby donations.");
+          async (err) => {
+            // On denied, check for previous location
+            const user = await supabase.auth.getUser();
+            if (user && user.data && user.data.user) {
+              const userId = user.data.user.id;
+              const { data, error } = await supabase
+                .from('profiles')
+                .select('latest_location')
+                .eq('id', userId)
+                .single();
+              if (data && data.latest_location) {
+                let loc = data.latest_location;
+                // If Supabase returns as string, parse it
+                if (typeof loc === 'string') {
+                  try {
+                    loc = JSON.parse(loc);
+                  } catch {}
+                }
+                if (loc && typeof loc.lat === 'number' && typeof loc.lng === 'number') {
+                  setLocation(loc);
+                  setIsStoredLocation(true);
+                  setLocationError(null);
+                  // reverse-geocode stored coords
+                  try {
+                    const apiRes = await fetch(`/api/reverse?lat=${loc.lat}&lon=${loc.lng}`);
+                    if (apiRes.ok) {
+                      const j = await apiRes.json();
+                      console.debug('reverse api (stored) response:', j);
+                      const short = extractShortAddress(j);
+                      if (short) {
+                        setAddress(short);
+                        console.debug('address set from stored coords (short):', short);
+                      } else if (j.display_name) {
+                        const shortFallback = j.display_name.split(',').slice(0,2).join(', ');
+                        setAddress(shortFallback);
+                        console.debug('address set from stored coords (display_name fallback):', shortFallback);
+                      }
+                    } else {
+                      console.debug('reverse api (stored) failed status:', apiRes.status);
+                    }
+                  } catch (e) { console.debug('reverse stored error', e); }
+                } else {
+                  setLocationError("Location access denied. Please enable location to view nearby donations.");
+                }
+              } else {
+                setLocationError("Location access denied. Please enable location to view nearby donations.");
+              }
+            } else {
+              setLocationError("Location access denied. Please enable location to view nearby donations.");
+            }
           }
         );
       } else {
         setLocationError("Geolocation is not supported by your browser.");
       }
+    }
+    if (!location) {
+      handleLocation();
     }
   }, []);
 
@@ -102,9 +230,10 @@ export default function ReceiverDashboard() {
   };
 
   useEffect(() => {
+    // re-fetch listings when view or location changes
     if (currentView === 'home') fetchAvailableListings();
     else if (currentView === 'taken') fetchTakenListings();
-  }, [currentView]);
+  }, [currentView, location]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -143,10 +272,11 @@ export default function ReceiverDashboard() {
   };
 
   const renderContent = () => {
-  if (loading) return <div className="text-center py-10">Loading...</div>;
-  if (locationError) return <div className="text-center py-10 text-red-600">{locationError}</div>;
-  if (!location) return <div className="text-center py-10">Please allow location access to view nearby donations.</div>;
+    if (loading) return <div className="text-center py-10">Loading...</div>;
+    if (locationError) return <div className="text-center py-10 text-red-600">{locationError}</div>;
+    if (!location) return <div className="text-center py-10">Please allow location access to view nearby donations.</div>;
 
+    // Detail view
     if (currentView === 'detail' && selectedListing) {
       return (
         <div className="p-4 md:p-6">
@@ -174,50 +304,72 @@ export default function ReceiverDashboard() {
       );
     }
 
+    // Always show address if location is set
+    let addressBanner = null;
+    if (location && (typeof location.lat === 'number' && typeof location.lng === 'number')) {
+      const bannerText = isStoredLocation ? 'Showing donations near your latest address:' : 'Showing donations at address:';
+      addressBanner = (
+        <div className="text-center py-2 text-green-600">
+          {bannerText} <br />
+          <span className="font-semibold">{address ?? 'Resolving address...'}</span>
+        </div>
+      );
+    }
+
     const listings = currentView === 'home' ? availableListings : takenListings;
     const isEmpty = listings.length === 0;
     const emptyMessage = currentView === 'home' 
       ? "No food available right now. Check back later!" 
       : "You have not accepted any food items yet.";
 
-    if (isEmpty) return <div className="text-center py-10">{emptyMessage}</div>;
+    if (isEmpty) {
+      return (
+        <>
+          {addressBanner}
+          <div className="text-center py-10">{emptyMessage}</div>
+        </>
+      );
+    }
 
     return (
-      <div className="p-4 md:p-6 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {listings.map(listing => (
-          <Card key={listing.id} className="flex flex-col">
-            <CardHeader>
-              <CardTitle>{listing.food_name}</CardTitle>
-            </CardHeader>
-            <CardContent className="flex-grow">
-              {listing.photo_url && (
-                <div className="aspect-video w-full overflow-hidden rounded-md mb-4">
-                    <img src={listing.photo_url} alt={listing.food_name} className="h-full w-full object-cover" />
+      <>
+        {addressBanner}
+        <div className="p-4 md:p-6 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {listings.map(listing => (
+            <Card key={listing.id} className="flex flex-col">
+              <CardHeader>
+                <CardTitle>{listing.food_name}</CardTitle>
+              </CardHeader>
+              <CardContent className="flex-grow">
+                {listing.photo_url && (
+                  <div className="aspect-video w-full overflow-hidden rounded-md mb-4">
+                      <img src={listing.photo_url} alt={listing.food_name} className="h-full w-full object-cover" />
+                  </div>
+                )}
+                <p className="text-sm text-muted-foreground mb-2 line-clamp-2 h-10">{listing.description}</p>
+                <div className="space-y-1 text-sm">
+                  <p><span className="font-semibold">Quantity:</span> {listing.quantity}</p>
+                  <p><span className="font-semibold">Expiry:</span> {new Date(listing.expiry_date).toLocaleDateString()}</p>
+                  <p><span className="font-semibold">Location:</span> {listing.location}</p>
                 </div>
-              )}
-              <p className="text-sm text-muted-foreground mb-2 line-clamp-2 h-10">{listing.description}</p>
-              <div className="space-y-1 text-sm">
-                <p><span className="font-semibold">Quantity:</span> {listing.quantity}</p>
-                <p><span className="font-semibold">Expiry:</span> {new Date(listing.expiry_date).toLocaleDateString()}</p>
-                <p><span className="font-semibold">Location:</span> {listing.location}</p>
-              </div>
-              {listing.taken && <p className="font-bold text-red-600 mt-2">Status: Taken</p>}
-            </CardContent>
-            <CardFooter className="flex flex-col items-start gap-2 pt-4">
-              {currentView === 'home' ? (
-                <Button className="w-full" onClick={() => { setSelectedListing(listing); setCurrentView('detail'); }}>
-                  View & Accept
-                </Button>
-              ) : (
-                <div className="w-full flex flex-col gap-2">
-                  <Button className="w-full"><MessageSquare className="mr-2 h-4 w-4" /> Chat</Button>
-                  <Button className="w-full" variant="secondary">Complete</Button>
-                </div>
-              )}
-            </CardFooter>
-          </Card>
-        ))}
-      </div>
+                {listing.taken && <p className="font-bold text-red-600 mt-2">Status: Taken</p>}
+              </CardContent>
+              <CardFooter className="flex flex-col items-start gap-2 pt-4">
+                {currentView === 'home' ? (
+                  <Button className="w-full" onClick={() => { setSelectedListing(listing); setCurrentView('detail'); }}>
+                    View & Accept
+                  </Button>
+                ) : (
+                  <div className="w-full flex flex-col gap-2">
+                    <Button className="w-full"><MessageSquare className="mr-2 h-4 w-4" /> Chat</Button>
+                    <Button className="w-full" variant="secondary">Complete</Button>
+                  </div>
+                )}
+              </CardFooter>
+            </Card>
+          ))}
+        </div>
+      </>
     );
   };
 
@@ -248,9 +400,7 @@ export default function ReceiverDashboard() {
             {sidebarOpen ? <X /> : <Menu />}
           </Button>
           <h1 className="text-2xl font-bold tracking-tight">
-            {currentView === 'home' && 'Available Food'}
-            {currentView === 'taken' && 'Your Taken Items'}
-            {currentView === 'detail' && 'Item Details'}
+            ReFeed
           </h1>
         </header>
 
