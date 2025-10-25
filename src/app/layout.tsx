@@ -3,6 +3,7 @@ import { PT_Sans } from 'next/font/google';
 import './globals.css';
 import { Providers } from '@/components/providers';
 import { cn } from '@/lib/utils';
+import NotificationListener from '@/components/NotificationListener';
 
 const ptSans = PT_Sans({
   subsets: ['latin'],
@@ -24,6 +25,8 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={cn('min-h-screen bg-background font-sans antialiased', ptSans.variable)}>
         <Providers>{children}</Providers>
+        {/* Client-side listener mounted inside server layout */}
+        <NotificationListener />
       </body>
     </html>
   );

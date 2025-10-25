@@ -6,11 +6,16 @@ import { supabase } from "@/lib/supabaseClient";
 import { Button } from '@/components/ui/button';
 import { PlusCircle, Info, MessageSquare } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { useRouter } from 'next/navigation';
+import { useToast } from '@/hooks/use-toast';
 
 // --- Main Donor Page Component ---
 export default function DonorPage() {
   const [donations, setDonations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const router = useRouter();
+  const { toast } = useToast();
+  const [openingChat, setOpeningChat] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchDonations = async () => {
@@ -32,6 +37,88 @@ export default function DonorPage() {
     fetchDonations();
   }, []);
 
+  useEffect(() => {
+    let notificationChannel: any = null;
+    (async () => {
+      try {
+        const { data } = await supabase.auth.getUser();
+        const uid = data?.user?.id;
+        if (!uid) return;
+
+        notificationChannel = supabase
+          .channel(`public:notifications:user_id=eq.${uid}`)
+          .on(
+            'postgres_changes',
+            { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
+            async (payload: any) => {
+              const n = payload.new;
+              // show toast with preview and link to conversation
+              toast({
+                title: 'New message',
+                description: n?.preview ?? 'New message received',
+                // optional click behavior: navigate to chat
+              });
+              // optionally you can navigate automatically: router.push(`/chat/${n.conversation_id}`)
+            }
+          )
+          .subscribe();
+      } catch (e) {
+        // ignore
+      }
+    })();
+
+    return () => {
+      if (notificationChannel) supabase.removeChannel(notificationChannel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const openChat = async (donationId: string) => {
+    if (openingChat) return;
+    setOpeningChat(donationId);
+
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      if (!userData.user) {
+        toast({ title: 'Sign in required', description: 'Please sign in to use chat.' });
+        return;
+      }
+
+      // Look for existing conversation
+      const { data: existing } = await supabase
+        .from('conversations')
+        .select('id')
+        .eq('donation_id', donationId)
+        .maybeSingle();
+
+      if (existing?.id) {
+        router.push(`/chat/${existing.id}`);
+        return;
+      }
+
+      // Create new conversation
+      const { data: created, error: createError } = await supabase
+        .from('conversations')
+        .insert({
+          donation_id: donationId,
+          donor_id: userData.user.id
+        })
+        .select()
+        .single();
+
+      if (createError) {
+        toast({ title: 'Chat Error', description: 'Unable to start chat.' });
+        return;
+      }
+
+      router.push(`/chat/${created.id}`);
+    } catch (err) {
+      toast({ title: 'Error', description: 'Failed to open chat.' });
+    } finally {
+      setOpeningChat(null);
+    }
+  };
+
   return (
     <div className="container py-8">
       <div className="flex flex-col items-start gap-4 md:flex-row md:items-center md:justify-between">
@@ -40,7 +127,7 @@ export default function DonorPage() {
             <p className="text-muted-foreground">Manage your food donations and see their status.</p>
         </div>
         <Button asChild size="lg">
-          <Link href="/donor/donate">
+          <Link href="/donor/donate" aria-label="Donate Food">
             <PlusCircle className="mr-2 h-5 w-5" />
             Donate Food
           </Link>
@@ -97,10 +184,17 @@ export default function DonorPage() {
               </div>
               {donation.taken && (
                 <div className="mt-4 flex flex-col gap-2">
-                  <Button>
-                    <MessageSquare className="mr-2 h-4 w-4" /> Chat
+                  <Button 
+                    onClick={() => openChat(donation.id)}
+                    disabled={openingChat === donation.id}
+                    aria-label={openingChat === donation.id ? `Opening chat for ${donation.id}` : `Open chat for ${donation.food_name ?? donation.id}`}
+                  >
+                    <MessageSquare className="mr-2 h-4 w-4" />
+                    {openingChat === donation.id ? 'Opening Chat...' : 'Chat'}
                   </Button>
-                  <Button variant="secondary">Complete</Button>
+
+                  {/* Restored Complete button as requested */}
+                  <Button variant="secondary" aria-label={`Mark donation ${donation.id} as complete`}>Complete</Button>
                 </div>
               )}
             </div>

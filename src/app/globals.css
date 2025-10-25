@@ -70,3 +70,44 @@ body {
     @apply bg-background text-foreground;
   }
 }
+
+/* Cross-browser compatibility helpers */
+html, body {
+  /* prevent mobile browser font auto-scaling */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Backdrop filter: include -webkit fallback for Safari */
+.backdrop, .modal-backdrop {
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+/* Mask image: include -webkit prefix for WebKit-based browsers */
+.masked {
+  -webkit-mask-image: var(--mask-image);
+  mask-image: var(--mask-image);
+}
+
+/* user-select fallbacks and ordering */
+.selector, .no-select {
+  -webkit-user-select: none; /* Safari/Chrome */
+  -ms-user-select: none;     /* IE/Edge legacy */
+  user-select: none;
+}
+
+/* appearance ordering: -webkit first then standard property */
+.input, button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* background-clip ordering: -webkit first */
+.some-bg-clip {
+  -webkit-background-clip: padding-box;
+  background-clip: padding-box;
+}
+
+/* Add any other vendor fallbacks your app uses; these classes are examples.
+   If your app uses specific utilities (e.g., .backdrop), adapt accordingly. */
