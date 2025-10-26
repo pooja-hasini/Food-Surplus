@@ -136,7 +136,7 @@ export default function ChatPage() {
     clearNotificationsForMe();
   }, [convId, userId]);
 
-  // ...existing code...
+ // ...existing code...
   const sendMessage = async () => {
     if (!text.trim() || !userId) {
       toast({ title: 'Not signed in', description: 'Please sign in to send messages.' });
@@ -162,7 +162,7 @@ export default function ChatPage() {
     try {
       if (!convId) throw new Error('Invalid conversation id');
 
-      // attempt insert
+      // insert message
       const { data: inserted, error } = await supabase
         .from('chat_messages')
         .insert({
@@ -173,11 +173,8 @@ export default function ChatPage() {
         .select()
         .single();
 
-      // detailed logging for debugging RLS/permission errors
       if (error) {
-        // show full error properties
         console.error('Insert error (full):', error, Object.getOwnPropertyNames(error));
-        // remove optimistic message
         setMessages(prev => prev.filter(m => m.id !== tempId));
         const full = JSON.stringify(error, Object.getOwnPropertyNames(error));
         toast({ title: 'Send failed', description: full || String(error) });
@@ -185,14 +182,13 @@ export default function ChatPage() {
       }
 
       if (!inserted) {
-        // no row returned — treat as failure
         console.error('Insert returned no row', { inserted, convId, userId });
         setMessages(prev => prev.filter(m => m.id !== tempId));
         toast({ title: 'Send failed', description: 'Insert returned no row from server.' });
         return;
       }
 
-      // replace temp with inserted (if not already added via realtime)
+      // replace temp with inserted (if realtime didn't already add it)
       setMessages(prev => {
         const withoutTemp = prev.filter(m => m.id !== tempId);
         if (!withoutTemp.some(m => String(m.id) === String(inserted.id))) {
@@ -201,7 +197,38 @@ export default function ChatPage() {
         return withoutTemp;
       });
 
-      // ...notifications code unchanged...
+      // create a notification for the other participant so they receive a realtime INSERT event
+      (async () => {
+        try {
+          let recipientId: string | null = null;
+          if (conversation?.donor_id && conversation?.receiver_id) {
+            recipientId = String(conversation.donor_id) === String(userId) ? conversation.receiver_id : conversation.donor_id;
+          } else {
+            const { data: convRow, error: convErr } = await supabase
+              .from('conversations')
+              .select('donor_id, receiver_id')
+              .eq('id', convId)
+              .limit(1)
+              .maybeSingle();
+            if (!convErr && convRow) {
+              recipientId = String(convRow.donor_id) === String(userId) ? convRow.receiver_id : convRow.donor_id;
+            }
+          }
+
+          if (recipientId && String(recipientId) !== String(userId)) {
+            await supabase.from('notifications').insert({
+              conversation_id: convId,
+              user_id: recipientId,
+              message: tempMsg.content,
+              read: false,
+              created_at: new Date().toISOString(),
+            });
+            // if you have a top-level notifications subscription it will get this insert
+          }
+        } catch (notifyErr) {
+          console.warn('Failed to create notification', notifyErr);
+        }
+      })();
     } catch (err: any) {
       console.error('Send error:', err);
       setMessages(prev => prev.filter(m => m.id !== tempId));
