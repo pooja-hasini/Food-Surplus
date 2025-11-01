@@ -1,6 +1,3 @@
-// Keep this file. It implements chat UI, realtime subscription, optimistic sends,
-// role detection and cleanup. Remove extra console.debug once stable.
-
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
@@ -11,7 +8,7 @@ import { Card } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { Check } from 'lucide-react';
 
-export default function ChatPage() { 
+export default function ChatPage() {
   const params = useParams();
   const router = useRouter();
   const convId = typeof params.id === 'string' ? params.id : '';
@@ -39,7 +36,7 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    if (!convId) return;
+    if (!convId || !userId) return;
     let channel: any = null;
 
     const load = async () => {
@@ -79,11 +76,11 @@ export default function ChatPage() {
               'postgres_changes',
               { event: 'INSERT', schema: 'public', table: 'chat_messages', filter: `conversation_id=eq.${convId}` },
               (payload: any) => {
-                // dedupe by id
                 setMessages(prev => {
                   if (prev.some(m => String(m.id) === String(payload.new.id))) return prev;
-                  // remove any optimistic temp that matches content + sender
-                  const filtered = prev.filter(m => !(m.__temp && m.content === payload.new.content && String(m.sender_id) === String(payload.new.sender_id)));
+                  const filtered = prev.filter(
+                    m => !(m.__temp && m.content === payload.new.content && String(m.sender_id) === String(payload.new.sender_id))
+                  );
                   return [...filtered, payload.new];
                 });
               }
@@ -105,14 +102,17 @@ export default function ChatPage() {
 
     return () => {
       if (realtimeRef.current) {
-        try { supabase.removeChannel(realtimeRef.current); } catch (e) { /* ignore */ }
+        try {
+          supabase.removeChannel(realtimeRef.current);
+        } catch (e) {}
         realtimeRef.current = null;
       }
       if (channel) {
-        try { supabase.removeChannel(channel); } catch (e) { /* ignore */ }
+        try {
+          supabase.removeChannel(channel);
+        } catch (e) {}
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [convId, userId]);
 
   useEffect(() => {
@@ -120,15 +120,10 @@ export default function ChatPage() {
   }, [messages]);
 
   useEffect(() => {
-    // when user opens chat clear their notifications for this conversation
     const clearNotificationsForMe = async () => {
       if (!convId || !userId) return;
       try {
-        await supabase
-          .from('notifications')
-          .delete()
-          .eq('conversation_id', convId)
-          .eq('user_id', userId);
+        await supabase.from('notifications').delete().eq('conversation_id', convId).eq('user_id', userId);
       } catch (e) {
         console.warn('Failed to clear notifications for conversation', e);
       }
@@ -136,7 +131,7 @@ export default function ChatPage() {
     clearNotificationsForMe();
   }, [convId, userId]);
 
- // ...existing code...
+  // ✅ Fixed sendMessage with recipientId guard
   const sendMessage = async () => {
     if (!text.trim() || !userId) {
       toast({ title: 'Not signed in', description: 'Please sign in to send messages.' });
@@ -154,7 +149,6 @@ export default function ChatPage() {
       __temp: true,
     };
 
-    // optimistic
     setMessages(prev => [...prev, tempMsg]);
     setText('');
     setSending(true);
@@ -162,7 +156,6 @@ export default function ChatPage() {
     try {
       if (!convId) throw new Error('Invalid conversation id');
 
-      // insert message
       const { data: inserted, error } = await supabase
         .from('chat_messages')
         .insert({
@@ -174,21 +167,19 @@ export default function ChatPage() {
         .single();
 
       if (error) {
-        console.error('Insert error (full):', error, Object.getOwnPropertyNames(error));
+        console.error('Insert error (full):', error);
         setMessages(prev => prev.filter(m => m.id !== tempId));
-        const full = JSON.stringify(error, Object.getOwnPropertyNames(error));
-        toast({ title: 'Send failed', description: full || String(error) });
+        toast({ title: 'Send failed', description: error.message });
         return;
       }
 
       if (!inserted) {
-        console.error('Insert returned no row', { inserted, convId, userId });
+        console.error('Insert returned no row');
         setMessages(prev => prev.filter(m => m.id !== tempId));
-        toast({ title: 'Send failed', description: 'Insert returned no row from server.' });
+        toast({ title: 'Send failed', description: 'Insert returned no row.' });
         return;
       }
 
-      // replace temp with inserted (if realtime didn't already add it)
       setMessages(prev => {
         const withoutTemp = prev.filter(m => m.id !== tempId);
         if (!withoutTemp.some(m => String(m.id) === String(inserted.id))) {
@@ -197,34 +188,42 @@ export default function ChatPage() {
         return withoutTemp;
       });
 
-      // create a notification for the other participant so they receive a realtime INSERT event
+      // ✅ SAFETY CHECK added here
       (async () => {
         try {
           let recipientId: string | null = null;
           if (conversation?.donor_id && conversation?.receiver_id) {
-            recipientId = String(conversation.donor_id) === String(userId) ? conversation.receiver_id : conversation.donor_id;
+            recipientId =
+              String(conversation.donor_id) === String(userId)
+                ? conversation.receiver_id
+                : conversation.donor_id;
           } else {
-            const { data: convRow, error: convErr } = await supabase
+            const { data: convRow } = await supabase
               .from('conversations')
               .select('donor_id, receiver_id')
               .eq('id', convId)
               .limit(1)
               .maybeSingle();
-            if (!convErr && convRow) {
-              recipientId = String(convRow.donor_id) === String(userId) ? convRow.receiver_id : convRow.donor_id;
+            if (convRow) {
+              recipientId =
+                String(convRow.donor_id) === String(userId)
+                  ? convRow.receiver_id
+                  : convRow.donor_id;
             }
           }
 
-          if (recipientId && String(recipientId) !== String(userId)) {
-            await supabase.from('notifications').insert({
-              conversation_id: convId,
-              user_id: recipientId,
-              message: tempMsg.content,
-              read: false,
-              created_at: new Date().toISOString(),
-            });
-            // if you have a top-level notifications subscription it will get this insert
+          if (!recipientId) {
+            console.warn('⚠️ Notification skipped — recipientId is null');
+            return;
           }
+
+          await supabase.from('notifications').insert({
+            conversation_id: convId,
+            user_id: recipientId,
+            message: tempMsg.content,
+            read: false,
+            created_at: new Date().toISOString(),
+          });
         } catch (notifyErr) {
           console.warn('Failed to create notification', notifyErr);
         }
@@ -232,12 +231,11 @@ export default function ChatPage() {
     } catch (err: any) {
       console.error('Send error:', err);
       setMessages(prev => prev.filter(m => m.id !== tempId));
-      toast({ title: 'Send failed', description: String(err?.message ?? err) });
+      toast({ title: 'Send failed', description: err?.message ?? 'Error sending message.' });
     } finally {
       setSending(false);
     }
   };
- // ...existing code...
 
   const toggleComplete = async (role: 'donor' | 'receiver') => {
     if (!conversation) return;
@@ -277,14 +275,23 @@ export default function ChatPage() {
 
   const renderMessages = () => {
     if (loading) return <div className="text-center text-sm">Loading messages...</div>;
-    if (!messages || messages.length === 0) return <div className="text-center text-sm text-muted-foreground">No messages yet</div>;
+    if (!messages || messages.length === 0)
+      return <div className="text-center text-sm text-muted-foreground">No messages yet</div>;
 
     return messages.map(m => {
       const isMe = String(m.sender_id) === String(userId);
       return (
-        <div key={m.id ?? String(Math.random())} className={`max-w-[80%] p-3 rounded-lg my-1 ${isMe ? 'ml-auto bg-emerald-100 text-emerald-900' : 'mr-auto bg-muted/20 text-muted-foreground'}`} style={{ wordBreak: 'break-word' }}>
+        <div
+          key={m.id ?? String(Math.random())}
+          className={`max-w-[80%] p-3 rounded-lg my-1 ${
+            isMe ? 'ml-auto bg-emerald-100 text-emerald-900' : 'mr-auto bg-muted/20 text-muted-foreground'
+          }`}
+          style={{ wordBreak: 'break-word' }}
+        >
           <div className="text-sm whitespace-pre-wrap">{m.content}</div>
-          <div className="text-xs text-muted-foreground mt-1">{new Date(m.created_at).toLocaleString()}</div>
+          <div className="text-xs text-muted-foreground mt-1">
+            {new Date(m.created_at).toLocaleString()}
+          </div>
         </div>
       );
     });
@@ -298,18 +305,31 @@ export default function ChatPage() {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-lg font-semibold">Chat</h2>
-            <p className="text-sm text-muted-foreground">{conversation?.donation_id ? `Donation: ${conversation.donation_id}` : ''}</p>
+            <p className="text-sm text-muted-foreground">
+              {conversation?.donation_id ? `Donation: ${conversation.donation_id}` : ''}
+            </p>
           </div>
           <div>
-            {/* only show relevant complete button if role known */}
-            {userId && (userId === conversation?.donor_id) && (
-              <Button size="sm" variant={conversation?.donor_complete ? 'secondary' : 'outline'} onClick={() => toggleComplete('donor')} disabled={updatingComplete}>
-                <Check className="mr-2 h-4 w-4" /> {conversation?.donor_complete ? 'Undo Complete' : 'Mark Complete'}
+            {userId && userId === conversation?.donor_id && (
+              <Button
+                size="sm"
+                variant={conversation?.donor_complete ? 'secondary' : 'outline'}
+                onClick={() => toggleComplete('donor')}
+                disabled={updatingComplete}
+              >
+                <Check className="mr-2 h-4 w-4" />{' '}
+                {conversation?.donor_complete ? 'Undo Complete' : 'Mark Complete'}
               </Button>
             )}
-            {userId && (userId === conversation?.receiver_id) && (
-              <Button size="sm" variant={conversation?.receiver_complete ? 'secondary' : 'outline'} onClick={() => toggleComplete('receiver')} disabled={updatingComplete}>
-                <Check className="mr-2 h-4 w-4" /> {conversation?.receiver_complete ? 'Undo Complete' : 'Mark Complete'}
+            {userId && userId === conversation?.receiver_id && (
+              <Button
+                size="sm"
+                variant={conversation?.receiver_complete ? 'secondary' : 'outline'}
+                onClick={() => toggleComplete('receiver')}
+                disabled={updatingComplete}
+              >
+                <Check className="mr-2 h-4 w-4" />{' '}
+                {conversation?.receiver_complete ? 'Undo Complete' : 'Mark Complete'}
               </Button>
             )}
           </div>
@@ -326,7 +346,12 @@ export default function ChatPage() {
           <textarea
             value={text}
             onChange={e => setText(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+              }
+            }}
             className="flex-1 rounded border p-2 resize-none"
             rows={2}
             placeholder="Write a message..."

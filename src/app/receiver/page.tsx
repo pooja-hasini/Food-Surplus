@@ -16,6 +16,8 @@ import {
   AlertDialogAction,
 } from '@/components/ui/alert-dialog';
 import { Home, ShoppingBag, LogOut, X, Menu, MessageSquare } from 'lucide-react';
+// 🔔 Notification additions:
+import { useToast } from '@/hooks/use-toast';
 
 type View = 'home' | 'taken' | 'detail';
 
@@ -33,6 +35,10 @@ export default function ReceiverDashboard() {
   const [locationError, setLocationError] = useState<string | null>(null);
   const [address, setAddress] = useState<string | null>(null);
   const [isStoredLocation, setIsStoredLocation] = useState<boolean>(false);
+
+  // 🔔 Notification additions - unread counts keyed by donation/listing id
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const { toast } = useToast();
 
   // helper to create a short friendly address from reverse geocode result
   function extractShortAddress(reverseJson: any) {
@@ -247,6 +253,28 @@ export default function ReceiverDashboard() {
     setSelectedListing(null);
   };
 
+  // helper to clear unread when chat opens
+  const clearUnread = async (conversationId: string, donationId?: string) => {
+    const { data: auth } = await supabase.auth.getUser();
+    const uid = auth?.user?.id;
+    if (!uid) return;
+
+    if (conversationId) {
+      await supabase
+        .from('notifications')
+        .update({ read: true })
+        .eq('conversation_id', conversationId)
+        .eq('user_id', uid);
+    }
+    if (donationId) {
+      setUnreadCounts(prev => {
+        const updated = { ...prev };
+        delete updated[donationId];
+        return updated;
+      });
+    }
+  };
+
   // open or create conversation for a listing, then navigate to chat page
   const openChat = async (listing: any) => {
     const { data: userData } = await supabase.auth.getUser();
@@ -286,6 +314,8 @@ export default function ReceiverDashboard() {
       }
 
       if (conv?.id) {
+        // 🔔 mark notifications read for this conversation and clear badge for this donation
+        await clearUnread(conv.id, listing.id);
         router.push(`/chat/${conv.id}`);
       } else {
         alert('Conversation not available.');
@@ -323,7 +353,16 @@ export default function ReceiverDashboard() {
             <CardFooter>
               <div className="w-full grid grid-cols-2 gap-2">
                 <Button onClick={() => setShowConfirmDialog(true)}>Accept This Item</Button>
-                <Button variant="ghost" onClick={() => openChat(selectedListing)}><MessageSquare className="mr-2 h-4 w-4" /> Chat</Button>
+                <div className="relative w-full">
+                  <Button variant="ghost" onClick={() => openChat(selectedListing)}>
+                    <MessageSquare className="mr-2 h-4 w-4" /> Chat
+                  </Button>
+                  { (unreadCounts[selectedListing.id] || 0) > 0 && (
+                    <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
+                      {unreadCounts[selectedListing.id]}
+                    </span>
+                  )}
+                </div>
               </div>
             </CardFooter>
           </Card>
@@ -387,7 +426,16 @@ export default function ReceiverDashboard() {
                   </Button>
                 ) : (
                   <div className="w-full flex flex-col gap-2">
-                    <Button className="w-full" onClick={() => openChat(listing)}><MessageSquare className="mr-2 h-4 w-4" /> Chat</Button>
+                    <div className="relative w-full">
+                      <Button className="w-full" onClick={() => openChat(listing)}>
+                        <MessageSquare className="mr-2 h-4 w-4" /> Chat
+                      </Button>
+                      { (unreadCounts[listing.id] || 0) > 0 && (
+                        <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
+                          {unreadCounts[listing.id]}
+                        </span>
+                      )}
+                    </div>
                     <Button className="w-full" variant="secondary">Complete</Button>
                   </div>
                 )}
@@ -398,7 +446,73 @@ export default function ReceiverDashboard() {
       </>
     );
   };
+    
+// ✅ Realtime unread badge + toast for receiver
+useEffect(() => {
+  const setup = async () => {
+    const { data: userData } = await supabase.auth.getUser();
+    const me = userData?.user;
+    if (!me) return;
 
+    // subscribe to new chat messages
+    const channel = supabase
+      .channel('receiver-notifications')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'chat_messages' },
+        async (payload) => {
+          const newMsg = payload.new;
+          if (!newMsg) return;
+
+          // find conversation info
+          const { data: conv } = await supabase
+            .from('conversations')
+            .select('donor_id, receiver_id, donation_id')
+            .eq('id', newMsg.conversation_id)
+            .maybeSingle();
+
+          if (!conv) return;
+
+          // ✅ Only trigger if the receiver is the target and not the sender
+          if (conv.receiver_id === me.id && newMsg.sender_id !== me.id) {
+            toast({
+              title: 'New message received',
+              description: newMsg.content?.slice(0, 60) || 'You have a new message',
+            });
+
+            setUnreadCounts(prev => {
+  if (!conv?.donation_id) return prev;
+  const donationId = String(conv.donation_id);
+  const updated = {
+    ...prev,
+    [donationId]: (prev[donationId] || 0) + 1,
+  };
+  console.log("🔔 Updated unreadCounts:", updated);
+  return updated;
+});
+
+            console.log('🔔 Realtime new msg received for donation:', conv.donation_id);
+console.log('Before update:', unreadCounts);
+console.log('After update:', {
+  ...unreadCounts,
+  [conv.donation_id]: (unreadCounts[conv.donation_id] || 0) + 1,
+});
+
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  };
+
+  setup();
+}, []);
+
+
+  
   return (
     <div className="flex h-screen bg-background">
       <aside className={`bg-muted/50 border-r transition-all duration-300 ${sidebarOpen ? 'w-64' : 'w-0'} overflow-hidden h-full flex-shrink-0`}>
