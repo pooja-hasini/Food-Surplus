@@ -1,35 +1,40 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
+const { createClient } = require("@supabase/supabase-js");
 
-/*
-  GET /api/notifications/unread-counts?userId=<userId>&donationIds=1,2,3
-  Response: { counts: { "<donationId>": <number>, ... } }
-  Replace mock logic with real DB queries.
-*/
+// ✅ Initialize Supabase client
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
-router.get('/unread-counts', async (req, res) => {
+// ✅ Route: get unread counts
+router.get("/unread-counts", async (req, res) => {
   try {
     const userId = req.query.userId;
-    const donationIdsParam = req.query.donationIds || '';
-    const donationIds = donationIdsParam ? donationIdsParam.split(',') : [];
+    if (!userId) {
+      return res.status(400).json({ error: "userId required" });
+    }
 
-    if (!userId) return res.status(400).json({ error: 'userId required' });
+    // 🧠 Query: count unread notifications per conversation
+    const { data, error } = await supabase
+      .from("notifications")
+      .select("conversation_id")
+      .eq("user_id", userId)
+      .eq("read", false);
 
-    // Replace this mock with DB query. Example (pseudo):
-    // SELECT donation_id, COUNT(*) AS unread FROM messages
-    // WHERE donation_id IN (...) AND recipient_id = ? AND is_read = false
-    // GROUP BY donation_id
+    if (error) throw error;
 
-    // Mock implementation (demo)
+    // 🧮 Group unread counts
     const counts = {};
-    donationIds.forEach((id) => {
-      counts[id] = Math.floor(Math.random() * 5); // demo random unread counts
+    data.forEach((n) => {
+      counts[n.conversation_id] = (counts[n.conversation_id] || 0) + 1;
     });
 
     return res.json({ counts });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'server error' });
+    console.error("Error fetching unread counts:", err);
+    return res.status(500).json({ error: "server error" });
   }
 });
 

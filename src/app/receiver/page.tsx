@@ -16,7 +16,7 @@ import {
   AlertDialogAction,
 } from '@/components/ui/alert-dialog';
 import { Home, ShoppingBag, LogOut, X, Menu, MessageSquare } from 'lucide-react';
-// 🔔 Notification additions:
+// Notification/toast hook (you already have this)
 import { useToast } from '@/hooks/use-toast';
 
 type View = 'home' | 'taken' | 'detail';
@@ -36,7 +36,7 @@ export default function ReceiverDashboard() {
   const [address, setAddress] = useState<string | null>(null);
   const [isStoredLocation, setIsStoredLocation] = useState<boolean>(false);
 
-  // 🔔 Notification additions - unread counts keyed by donation/listing id
+  // 🔔 Notification additions - unread counts keyed by donation/listing id (string keys)
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const { toast } = useToast();
 
@@ -198,6 +198,7 @@ export default function ReceiverDashboard() {
     if (!location) handleLocation();
   }, []);
 
+
   const fetchTakenListings = async () => {
     setLoading(true);
     const { data: userData } = await supabase.auth.getUser();
@@ -269,7 +270,7 @@ export default function ReceiverDashboard() {
     if (donationId) {
       setUnreadCounts(prev => {
         const updated = { ...prev };
-        delete updated[donationId];
+        delete updated[String(donationId)];
         return updated;
       });
     }
@@ -357,9 +358,9 @@ export default function ReceiverDashboard() {
                   <Button variant="ghost" onClick={() => openChat(selectedListing)}>
                     <MessageSquare className="mr-2 h-4 w-4" /> Chat
                   </Button>
-                  { (unreadCounts[selectedListing.id] || 0) > 0 && (
+                  { (unreadCounts[String(selectedListing.id)] || 0) > 0 && (
                     <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
-                      {unreadCounts[selectedListing.id]}
+                      {unreadCounts[String(selectedListing.id)]}
                     </span>
                   )}
                 </div>
@@ -430,9 +431,9 @@ export default function ReceiverDashboard() {
                       <Button className="w-full" onClick={() => openChat(listing)}>
                         <MessageSquare className="mr-2 h-4 w-4" /> Chat
                       </Button>
-                      { (unreadCounts[listing.id] || 0) > 0 && (
+                      { (unreadCounts[String(listing.id)] || 0) > 0 && (
                         <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
-                          {unreadCounts[listing.id]}
+                          {unreadCounts[String(listing.id)]}
                         </span>
                       )}
                     </div>
@@ -446,73 +447,156 @@ export default function ReceiverDashboard() {
       </>
     );
   };
-    
-// ✅ Realtime unread badge + toast for receiver
+
+  // ========== INITIAL UNREAD FETCH ==========
+  // Fetch unread notifications and map them to donation_id counts (run once on mount)
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: auth } = await supabase.auth.getUser();
+        const myUid = auth?.user?.id;
+        if (!myUid) return;
+
+        // fetch unread notifications for this user
+        const { data: notifs, error: notifsErr } = await supabase
+          .from('notifications')
+          .select('id, conversation_id, read')
+          .eq('user_id', myUid)
+          .eq('read', false);
+
+        if (notifsErr) {
+          console.error('loadUnread: notifications fetch error', notifsErr);
+          return;
+        }
+        if (!notifs || notifs.length === 0) {
+          setUnreadCounts({});
+          return;
+        }
+
+        // gather conversation ids present
+        const convIds = Array.from(new Set(notifs.map((n: any) => n.conversation_id).filter(Boolean)));
+        if (convIds.length === 0) return;
+
+        // get conversation -> donation mapping
+        const { data: convs } = await supabase
+          .from('conversations')
+          .select('id, donation_id')
+          .in('id', convIds);
+
+        const convToDonation: Record<string,string> = {};
+        convs?.forEach((c: any) => {
+          if (c && c.id && c.donation_id) convToDonation[String(c.id)] = String(c.donation_id);
+        });
+
+        const counts: Record<string, number> = {};
+        (notifs || []).forEach((n: any) => {
+          const donationId = convToDonation[String(n.conversation_id)];
+          if (!donationId) return;
+          counts[donationId] = (counts[donationId] || 0) + 1;
+        });
+
+        setUnreadCounts(counts);
+        console.log('Initial unreadCounts loaded:', counts);
+      } catch (e) {
+        console.error('initial unread fetch error', e);
+      }
+    })();
+    // run once on mount
+  }, []);
+
+  // ========== REALTIME SUBSCRIPTION ==========
+  // Subscribe to notifications for me (server should insert a notifications row only for recipient)
+ // ✅ REALTIME SUBSCRIPTION FIX — accurate unread count + ignore self-sent
 useEffect(() => {
-  const setup = async () => {
-    const { data: userData } = await supabase.auth.getUser();
-    const me = userData?.user;
-    if (!me) return;
+  let channelRef: any = null;
 
-    // subscribe to new chat messages
-    const channel = supabase
-      .channel('receiver-notifications')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'chat_messages' },
-        async (payload) => {
-          const newMsg = payload.new;
-          if (!newMsg) return;
+  (async () => {
+    try {
+      const { data: auth } = await supabase.auth.getUser();
+      const myUid = auth?.user?.id;
+      if (!myUid) return;
 
-          // find conversation info
-          const { data: conv } = await supabase
-            .from('conversations')
-            .select('donor_id, receiver_id, donation_id')
-            .eq('id', newMsg.conversation_id)
-            .maybeSingle();
+      channelRef = supabase
+        .channel(`notifications-user-${myUid}`)
+        .on(
+          'postgres_changes',
+          {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'notifications',
+            filter: `user_id=eq.${myUid}`,
+          },
+          async (payload: any) => {
+            const n = payload.new;
+            if (!n) return;
 
-          if (!conv) return;
+            // 🚫 Skip self-triggered notifications
+            if (n.sender_id && String(n.sender_id) === String(myUid)) {
+              console.log('Skipped self notification:', n);
+              return;
+            }
 
-          // ✅ Only trigger if the receiver is the target and not the sender
-          if (conv.receiver_id === me.id && newMsg.sender_id !== me.id) {
+            // ✅ Fetch unread count for that conversation freshly (accurate)
+            const { data: unreadNotifs, error: unreadErr } = await supabase
+              .from('notifications')
+              .select('id, conversation_id, read')
+              .eq('conversation_id', n.conversation_id)
+              .eq('user_id', myUid)
+              .eq('read', false);
+
+            if (unreadErr) {
+              console.error('Unread fetch error:', unreadErr);
+              return;
+            }
+
+            // Get conversation → donation mapping
+            const { data: conv } = await supabase
+              .from('conversations')
+              .select('donation_id')
+              .eq('id', n.conversation_id)
+              .maybeSingle();
+
+            if (!conv || !conv.donation_id) return;
+            const donationId = String(conv.donation_id);
+
+            const totalUnread = unreadNotifs?.length || 0;
+
+            // 🧮 Update badge count exactly
+            setUnreadCounts((prev) => ({
+              ...prev,
+              [donationId]: totalUnread,
+            }));
+
+            // 🔔 Optional: show toast
             toast({
               title: 'New message received',
-              description: newMsg.content?.slice(0, 60) || 'You have a new message',
+              description:
+                n.preview?.slice(0, 100) ||
+                n.message?.slice(0, 100) ||
+                'You have a new message',
             });
 
-            setUnreadCounts(prev => {
-  if (!conv?.donation_id) return prev;
-  const donationId = String(conv.donation_id);
-  const updated = {
-    ...prev,
-    [donationId]: (prev[donationId] || 0) + 1,
-  };
-  console.log("🔔 Updated unreadCounts:", updated);
-  return updated;
-});
-
-            console.log('🔔 Realtime new msg received for donation:', conv.donation_id);
-console.log('Before update:', unreadCounts);
-console.log('After update:', {
-  ...unreadCounts,
-  [conv.donation_id]: (unreadCounts[conv.donation_id] || 0) + 1,
-});
-
+            console.log('Updated unreadCounts:', donationId, totalUnread);
           }
-        }
-      )
-      .subscribe();
+        )
+        .subscribe();
+    } catch (e) {
+      console.error('Realtime setup error:', e);
+    }
+  })();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+  return () => {
+    if (channelRef) {
+      try {
+        supabase.removeChannel(channelRef);
+      } catch (e) {
+        console.debug('Error removing channel', e);
+      }
+    }
   };
-
-  setup();
 }, []);
 
 
-  
   return (
     <div className="flex h-screen bg-background">
       <aside className={`bg-muted/50 border-r transition-all duration-300 ${sidebarOpen ? 'w-64' : 'w-0'} overflow-hidden h-full flex-shrink-0`}>
