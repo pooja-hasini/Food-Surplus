@@ -253,7 +253,7 @@ export default function DonorPage() {
                       )}
                     </Button>
 
-                    <Button variant="secondary">Complete</Button>
+                    {/* Complete button removed for donors - receivers mark completion */}
                   </div>
                 )}
               </div>

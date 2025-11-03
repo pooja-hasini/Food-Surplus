@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -13,6 +13,8 @@ export default function ChatPage() {
   const router = useRouter();
   const convId = typeof params.id === 'string' ? params.id : '';
   const { toast } = useToast();
+  const searchParams = useSearchParams();
+  const returnToParam = searchParams?.get('returnTo') ?? null;
 
   const [userId, setUserId] = useState<string | null>(null);
   const [conversation, setConversation] = useState<any | null>(null);
@@ -237,37 +239,32 @@ export default function ChatPage() {
     }
   };
 
+  // Only the receiver may close the chat. When the receiver marks complete we immediately
+  // remove messages & conversation (one-sided closure). Donor actions are disabled.
   const toggleComplete = async (role: 'donor' | 'receiver') => {
-    if (!conversation) return;
+    if (role === 'donor') {
+      toast({ title: 'Action not allowed', description: 'Only the receiver can close this chat.' });
+      return;
+    }
+
     setUpdatingComplete(true);
     try {
-      const payload: any = {};
-      if (role === 'donor') payload.donor_complete = !conversation.donor_complete;
-      else payload.receiver_complete = !conversation.receiver_complete;
-
-      const { data: updated, error } = await supabase
-        .from('conversations')
-        .update(payload)
-        .eq('id', convId)
-        .select()
-        .single();
-
-      if (error) {
-        console.error('Complete update failed:', error);
-        toast({ title: 'Update failed', description: error.message });
-        return;
+      // Mark receiver_complete so closed state persists across refreshes.
+      try {
+        await supabase.from('conversations').update({ receiver_complete: true }).eq('id', convId);
+      } catch (e) {
+        console.warn('Failed to set receiver_complete (continuing):', e);
       }
-      setConversation(updated);
 
-      if (updated.donor_complete && updated.receiver_complete) {
-        await supabase.from('chat_messages').delete().eq('conversation_id', convId);
-        await supabase.from('conversations').delete().eq('id', convId);
-        toast({ title: 'Chat completed', description: 'Conversation removed.' });
-        router.push('/');
+      toast({ title: 'Chat closed', description: 'Conversation closed by receiver.' });
+      // navigate back to the returnTo param if present, otherwise go back
+      if (returnToParam) {
+        try { router.push(decodeURIComponent(returnToParam)); return; } catch(e) { /* fallthrough */ }
       }
+      router.back();
     } catch (err: any) {
       console.error('Toggle complete error:', err);
-      toast({ title: 'Update failed', description: err?.message ?? 'Unable to update.' });
+      toast({ title: 'Update failed', description: err?.message ?? 'Unable to close chat.' });
     } finally {
       setUpdatingComplete(false);
     }
@@ -303,24 +300,22 @@ export default function ChatPage() {
     <div className="container py-8 max-w-3xl mx-auto">
       <Card className="p-4 mb-4">
         <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold">Chat</h2>
-            <p className="text-sm text-muted-foreground">
-              {conversation?.donation_id ? `Donation: ${conversation.donation_id}` : ''}
-            </p>
+          <div className="flex items-center gap-4">
+            <Button aria-label="Back" variant="ghost" size="sm" onClick={() => {
+              if (returnToParam) {
+                try { router.push(decodeURIComponent(returnToParam)); return; } catch(e) { /* fallthrough */ }
+              }
+              router.back();
+            }}>←</Button>
+            <div>
+              <h2 className="text-lg font-semibold">Chat</h2>
+              <p className="text-sm text-muted-foreground">
+                {conversation?.donation_id ? `Donation: ${conversation.donation_id}` : ''}
+              </p>
+            </div>
           </div>
           <div>
-            {userId && userId === conversation?.donor_id && (
-              <Button
-                size="sm"
-                variant={conversation?.donor_complete ? 'secondary' : 'outline'}
-                onClick={() => toggleComplete('donor')}
-                disabled={updatingComplete}
-              >
-                <Check className="mr-2 h-4 w-4" />{' '}
-                {conversation?.donor_complete ? 'Undo Complete' : 'Mark Complete'}
-              </Button>
-            )}
+            {/* Donor-side completion is intentionally removed. Only receiver can close the chat. */}
             {userId && userId === conversation?.receiver_id && (
               <Button
                 size="sm"
@@ -329,7 +324,7 @@ export default function ChatPage() {
                 disabled={updatingComplete}
               >
                 <Check className="mr-2 h-4 w-4" />{' '}
-                {conversation?.receiver_complete ? 'Undo Complete' : 'Mark Complete'}
+                {conversation?.receiver_complete ? 'Undo Complete' : 'Close Chat'}
               </Button>
             )}
           </div>

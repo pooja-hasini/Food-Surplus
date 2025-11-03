@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from '@/components/ui/card';
@@ -36,9 +36,27 @@ export default function ReceiverDashboard() {
   const [address, setAddress] = useState<string | null>(null);
   const [isStoredLocation, setIsStoredLocation] = useState<boolean>(false);
 
+  const searchParams = useSearchParams();
+
+  // if a `view` query param is present (e.g. returning from chat), set the view
+  useEffect(() => {
+    try {
+      let v = searchParams?.get('view');
+      // fallback for plain refresh where useSearchParams may be unavailable in SSR bailout
+      if (!v && typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        v = params.get('view');
+      }
+      if (v === 'home' || v === 'taken' || v === 'detail') {
+        setCurrentView(v as View);
+      }
+    } catch (e) {}
+  }, [searchParams]);
+
   // 🔔 Notification additions - unread counts keyed by donation/listing id
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const { toast } = useToast();
+  const [completedIds, setCompletedIds] = useState<string[]>([]);
 
   // helper to create a short friendly address from reverse geocode result
   function extractShortAddress(reverseJson: any) {
@@ -114,6 +132,17 @@ export default function ReceiverDashboard() {
         const dist = getDistanceKm(location.lat, location.lng, listing.latitude, listing.longitude);
         return dist <= 20;
       });
+    }
+    // attach conversation info (if any) to listings so UI can show 'Completed'
+    const ids = (filtered || []).map((l: any) => l.id).filter(Boolean);
+    if (ids.length > 0) {
+      const { data: convs } = await supabase
+        .from('conversations')
+        .select('id, donation_id, donor_complete, receiver_complete')
+        .in('donation_id', ids);
+      const convMap: Record<string, any> = {};
+      (convs || []).forEach((c: any) => { convMap[String(c.donation_id)] = c; });
+      filtered = (filtered || []).map((l: any) => ({ ...l, _conversation: convMap[String(l.id)] || null }));
     }
     setAvailableListings(filtered);
     setLoading(false);
@@ -212,7 +241,18 @@ export default function ReceiverDashboard() {
       .order('created_at', { ascending: false });
 
     if (error) console.error(error);
-    setTakenListings(data || []);
+    let listings = data || [];
+    const ids = listings.map((l: any) => l.id).filter(Boolean);
+    if (ids.length > 0) {
+      const { data: convs } = await supabase
+        .from('conversations')
+        .select('id, donation_id, donor_complete, receiver_complete')
+        .in('donation_id', ids);
+      const convMap: Record<string, any> = {};
+      (convs || []).forEach((c: any) => { convMap[String(c.donation_id)] = c; });
+      listings = listings.map((l: any) => ({ ...l, _conversation: convMap[String(l.id)] || null }));
+    }
+    setTakenListings(listings);
     setLoading(false);
   };
 
@@ -243,14 +283,20 @@ export default function ReceiverDashboard() {
       return;
     }
 
-    setShowConfirmDialog(false);
-    setSelectedListing(null);
-    setCurrentView('taken');
+  setShowConfirmDialog(false);
+  setSelectedListing(null);
+  navigateToView('taken');
   };
 
   const navigateToView = (view: View) => {
     setCurrentView(view);
     setSelectedListing(null);
+    try {
+      // update URL so refresh preserves current view
+      router.replace(`/receiver?view=${view}`);
+    } catch (e) {
+      // ignore router errors
+    }
   };
 
   // helper to clear unread when chat opens
@@ -277,6 +323,9 @@ export default function ReceiverDashboard() {
 
   // open or create conversation for a listing, then navigate to chat page
   const openChat = async (listing: any) => {
+    if (completedIds.includes(String(listing.id))) return alert('This conversation has been completed and is closed.');
+    // immediate in-memory guard: if listing._completed or persisted completed flag is set we block right away
+    if (listing?._completed || listing?.completed || completedIds.includes(String(listing.id))) return alert('This conversation has been completed and is closed.');
     const { data: userData } = await supabase.auth.getUser();
     const me = userData?.user;
     if (!me) return alert('You must be signed in to chat.');
@@ -314,15 +363,50 @@ export default function ReceiverDashboard() {
       }
 
       if (conv?.id) {
+        // if conversation already marked completed by both parties, prevent opening
+        if (conv.donor_complete && conv.receiver_complete) {
+          return alert('This conversation has been completed and is closed.');
+        }
         // 🔔 mark notifications read for this conversation and clear badge for this donation
         await clearUnread(conv.id, listing.id);
-        router.push(`/chat/${conv.id}`);
+        // include a returnTo param so chat can navigate back to the correct view
+        const returnTo = encodeURIComponent(`/receiver?view=${currentView}`);
+        router.push(`/chat/${conv.id}?returnTo=${returnTo}`);
       } else {
         alert('Conversation not available.');
       }
     } catch (e) {
       console.error('openChat error', e);
       alert('Unable to open chat.');
+    }
+  };
+
+  // Receiver marks an accepted item as completed. This will set receiver_complete on the conversation,
+  // and if both parties have marked complete, delete the conversation/messages to close the chat.
+  const handleComplete = async (listing: any) => {
+    try {
+      // call server endpoint which will delete conversation/messages and mark the listing.completed flag (if supported)
+      const res = await fetch('/api/close-listing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ listingId: listing.id }),
+      });
+      if (!res.ok) {
+        console.warn('close-listing API returned error', await res.text());
+        // fall back to best-effort client-side cleanup
+      }
+
+      // mark completed locally so UI shows 'Completed' and prevent reopening
+      setCompletedIds(prev => Array.from(new Set([...prev, String(listing.id)])));
+      toast({ title: 'Completed', description: 'Item marked completed and chat closed.' });
+
+      // update local listings to reflect closed conversation
+      const applyRemoveConvToList = (arr: any[]) => arr.map((l: any) => l.id === listing.id ? { ...l, _conversation: null, _completed: true, completed: true } : l);
+      setAvailableListings(prev => applyRemoveConvToList(prev));
+      setTakenListings(prev => applyRemoveConvToList(prev));
+    } catch (e) {
+      console.error('handleComplete error', e);
+      alert('Unable to complete at this time.');
     }
   };
 
@@ -354,10 +438,10 @@ export default function ReceiverDashboard() {
               <div className="w-full grid grid-cols-2 gap-2">
                 <Button onClick={() => setShowConfirmDialog(true)}>Accept This Item</Button>
                 <div className="relative w-full">
-                  <Button variant="ghost" onClick={() => openChat(selectedListing)}>
-                    <MessageSquare className="mr-2 h-4 w-4" /> Chat
+                  <Button variant="ghost" onClick={() => openChat(selectedListing)} disabled={selectedListing?._completed || completedIds.includes(String(selectedListing?.id))}>
+                    <MessageSquare className="mr-2 h-4 w-4" /> {selectedListing?._completed || completedIds.includes(String(selectedListing?.id)) ? 'Closed' : 'Chat'}
                   </Button>
-                  { (unreadCounts[selectedListing.id] || 0) > 0 && (
+                  { !selectedListing?._completed && (unreadCounts[selectedListing.id] || 0) > 0 && (
                     <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
                       {unreadCounts[selectedListing.id]}
                     </span>
@@ -417,26 +501,33 @@ export default function ReceiverDashboard() {
                   <p><span className="font-semibold">Quantity:</span> {listing.quantity}</p>
                   <p><span className="font-semibold">Expiry:</span> {listing.expiry_date ? new Date(listing.expiry_date).toLocaleDateString() : '—'}</p>
                 </div>
-                {listing.taken && <p className="font-bold text-red-600 mt-2">Status: Taken</p>}
+                {listing.taken && (() => {
+                  const isCompleted = completedIds.includes(String(listing.id)) || listing._completed || listing.completed || (listing._conversation && listing._conversation.donor_complete && listing._conversation.receiver_complete);
+                  return (
+                    <p className={`font-bold mt-2 ${isCompleted ? 'text-green-600' : 'text-red-600'}`}>
+                      Status: {isCompleted ? 'Completed' : 'Taken'}
+                    </p>
+                  );
+                })()}
               </CardContent>
               <CardFooter className="flex flex-col items-start gap-2 pt-4">
                 {currentView === 'home' ? (
-                  <Button className="w-full" onClick={() => { setSelectedListing(listing); setCurrentView('detail'); }}>
+                  <Button className="w-full" onClick={() => { setSelectedListing(listing); navigateToView('detail'); }}>
                     View & Accept
                   </Button>
                 ) : (
                   <div className="w-full flex flex-col gap-2">
                     <div className="relative w-full">
-                      <Button className="w-full" onClick={() => openChat(listing)}>
-                        <MessageSquare className="mr-2 h-4 w-4" /> Chat
+                      <Button className="w-full" onClick={() => openChat(listing)} disabled={listing?._completed || completedIds.includes(String(listing?.id))}>
+                        <MessageSquare className="mr-2 h-4 w-4" /> {listing?._completed || completedIds.includes(String(listing?.id)) ? 'Closed' : 'Chat'}
                       </Button>
-                      { (unreadCounts[listing.id] || 0) > 0 && (
+                      { !listing._completed && (unreadCounts[listing.id] || 0) > 0 && (
                         <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
                           {unreadCounts[listing.id]}
                         </span>
                       )}
                     </div>
-                    <Button className="w-full" variant="secondary">Complete</Button>
+                    <Button className="w-full" variant="secondary" onClick={() => handleComplete(listing)}>Complete</Button>
                   </div>
                 )}
               </CardFooter>
