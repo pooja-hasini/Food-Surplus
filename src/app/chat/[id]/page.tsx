@@ -156,6 +156,7 @@ export default function ChatPage() {
     try {
       if (!convId) throw new Error('Invalid conversation id');
 
+      // insert message
       const { data: inserted, error } = await supabase
         .from('chat_messages')
         .insert({
@@ -188,46 +189,43 @@ export default function ChatPage() {
         return withoutTemp;
       });
 
-      // ✅ SAFETY CHECK added here
-      (async () => {
-        try {
-          let recipientId: string | null = null;
-          if (conversation?.donor_id && conversation?.receiver_id) {
-            recipientId =
-              String(conversation.donor_id) === String(userId)
-                ? conversation.receiver_id
-                : conversation.donor_id;
-          } else {
-            const { data: convRow } = await supabase
-              .from('conversations')
-              .select('donor_id, receiver_id')
-              .eq('id', convId)
-              .limit(1)
-              .maybeSingle();
-            if (convRow) {
-              recipientId =
-                String(convRow.donor_id) === String(userId)
-                  ? convRow.receiver_id
-                  : convRow.donor_id;
-            }
-          }
+      // --- Ensure notification is created now (awaited) with donation_id and recipient user_id ---
+      try {
+        // ensure we have conversation info
+        let convRow = conversation;
+        if (!convRow || !convRow.donor_id || !convRow.receiver_id || !convRow.donation_id) {
+          const { data: fetchedConv } = await supabase
+            .from('conversations')
+            .select('id, donor_id, receiver_id, donation_id')
+            .eq('id', convId)
+            .limit(1)
+            .maybeSingle();
+          if (fetchedConv) convRow = fetchedConv;
+        }
 
-          if (!recipientId) {
-            console.warn('⚠️ Notification skipped — recipientId is null');
-            return;
-          }
+        // determine recipient
+        let recipientId: string | null = null;
+        if (convRow?.donor_id && convRow?.receiver_id) {
+          recipientId = String(convRow.donor_id) === String(userId) ? convRow.receiver_id : convRow.donor_id;
+        }
 
+        const donationId = convRow?.donation_id ?? null;
+
+        if (recipientId && String(recipientId) !== String(userId)) {
           await supabase.from('notifications').insert({
             conversation_id: convId,
+            donation_id: donationId,
             user_id: recipientId,
-            message: tempMsg.content,
+            preview: tempMsg.content,
             read: false,
             created_at: new Date().toISOString(),
           });
-        } catch (notifyErr) {
-          console.warn('Failed to create notification', notifyErr);
         }
-      })();
+      } catch (notifErr) {
+        // don't block message send on notification failure; log safe string
+        try { console.error('Notification insert failed:', String(notifErr)); } catch {}
+      }
+      // --- end notification creation ---
     } catch (err: any) {
       console.error('Send error:', err);
       setMessages(prev => prev.filter(m => m.id !== tempId));

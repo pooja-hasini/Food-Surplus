@@ -35,10 +35,36 @@ export default function ReceiverDashboard() {
   const [locationError, setLocationError] = useState<string | null>(null);
   const [address, setAddress] = useState<string | null>(null);
   const [isStoredLocation, setIsStoredLocation] = useState<boolean>(false);
-
-  // 🔔 Notification additions - unread counts keyed by donation/listing id (string keys)
-  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [unreadListings, setUnreadListings] = useState<Record<string, boolean>>({});
+  const notifRef = React.useRef<any>(null);
+  const processedNotifsRef = React.useRef<Set<string>>(new Set());
   const { toast } = useToast();
+
+  // Safely log errors (handles Supabase/Postgres Error objects that have non-enumerable props)
+  function safeLogError(label: string, err: any) {
+    try {
+      // prefer explicit properties if present
+      const names = Object.getOwnPropertyNames(err || {});
+      if (names.length > 0) {
+        const out: Record<string, any> = {};
+        names.forEach((k) => {
+          try {
+            out[k] = (err as any)[k];
+          } catch {
+            out[k] = "[unserializable]";
+          }
+        });
+        console.error(`${label}: ${JSON.stringify(out)}`);
+        return;
+      }
+      // fallback to common fields
+      const msg = (err && ((err.message) || (err.error) || String(err))) ?? String(err);
+      console.error(`${label}: ${msg}`);
+    } catch (e) {
+      // ultimate fallback
+      try { console.error(`${label}: ${String(err)}`); } catch { /* ignore */ }
+    }
+  }
 
   // helper to create a short friendly address from reverse geocode result
   function extractShortAddress(reverseJson: any) {
@@ -80,7 +106,7 @@ export default function ReceiverDashboard() {
           console.error('reverse API failed', apiRes.status);
         }
       } catch (e) {
-        console.error('reverse API error', e);
+        safeLogError('reverse API error', e);
       }
     })();
   }, [location, address]);
@@ -106,7 +132,7 @@ export default function ReceiverDashboard() {
       .eq('taken', false)
       .order('created_at', { ascending: false });
 
-    if (error) console.error(error);
+    if (error) safeLogError('fetchAvailableListings error', error);
     let filtered = data || [];
     if (location) {
       filtered = filtered.filter((listing: any) => {
@@ -198,7 +224,6 @@ export default function ReceiverDashboard() {
     if (!location) handleLocation();
   }, []);
 
-
   const fetchTakenListings = async () => {
     setLoading(true);
     const { data: userData } = await supabase.auth.getUser();
@@ -212,7 +237,7 @@ export default function ReceiverDashboard() {
       .eq('taken_by', user.id)
       .order('created_at', { ascending: false });
 
-    if (error) console.error(error);
+    if (error) safeLogError('fetchTakenListings error', error);
     setTakenListings(data || []);
     setLoading(false);
   };
@@ -268,7 +293,7 @@ export default function ReceiverDashboard() {
         .eq('user_id', uid);
     }
     if (donationId) {
-      setUnreadCounts(prev => {
+      setUnreadListings(prev => {
         const updated = { ...prev };
         delete updated[String(donationId)];
         return updated;
@@ -315,14 +340,14 @@ export default function ReceiverDashboard() {
       }
 
       if (conv?.id) {
-        // 🔔 mark notifications read for this conversation and clear badge for this donation
-        await clearUnread(conv.id, listing.id);
+        // clear local unread flag for this listing (chat page will clear DB notifications)
+        setUnreadListings(prev => ({ ...prev, [String(listing.id)]: false }));
         router.push(`/chat/${conv.id}`);
       } else {
         alert('Conversation not available.');
       }
     } catch (e) {
-      console.error('openChat error', e);
+      safeLogError('openChat error', e);
       alert('Unable to open chat.');
     }
   };
@@ -355,13 +380,11 @@ export default function ReceiverDashboard() {
               <div className="w-full grid grid-cols-2 gap-2">
                 <Button onClick={() => setShowConfirmDialog(true)}>Accept This Item</Button>
                 <div className="relative w-full">
-                  <Button variant="ghost" onClick={() => openChat(selectedListing)}>
+                  <Button variant="ghost" className="w-full" onClick={() => openChat(selectedListing)}>
                     <MessageSquare className="mr-2 h-4 w-4" /> Chat
                   </Button>
-                  { (unreadCounts[String(selectedListing.id)] || 0) > 0 && (
-                    <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
-                      {unreadCounts[String(selectedListing.id)]}
-                    </span>
+                  { unreadListings[String(selectedListing.id)] && (
+                    <span className="absolute -top-2 -right-2 h-3 w-3 bg-red-600 rounded-full ring-2 ring-white" aria-hidden />
                   )}
                 </div>
               </div>
@@ -427,15 +450,11 @@ export default function ReceiverDashboard() {
                   </Button>
                 ) : (
                   <div className="w-full flex flex-col gap-2">
-                    <div className="relative w-full">
-                      <Button className="w-full" onClick={() => openChat(listing)}>
+                    <div className="relative inline-block w-full">
+                      <Button className="w-full" onClick={() => { setUnreadListings(prev => ({ ...prev, [String(listing.id)]: false })); openChat(listing); }}>
                         <MessageSquare className="mr-2 h-4 w-4" /> Chat
                       </Button>
-                      { (unreadCounts[String(listing.id)] || 0) > 0 && (
-                        <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
-                          {unreadCounts[String(listing.id)]}
-                        </span>
-                      )}
+                      {unreadListings[String(listing.id)] && <span className="absolute -top-1 -right-1 h-3 w-3 bg-red-600 rounded-full ring-2 ring-white" aria-hidden />}
                     </div>
                     <Button className="w-full" variant="secondary">Complete</Button>
                   </div>
@@ -449,7 +468,7 @@ export default function ReceiverDashboard() {
   };
 
   // ========== INITIAL UNREAD FETCH ==========
-  // Fetch unread notifications and map them to donation_id counts (run once on mount)
+  // Fetch unread notifications and map to donation booleans (robust when notifications.donation_id may not exist)
   useEffect(() => {
     (async () => {
       try {
@@ -457,7 +476,7 @@ export default function ReceiverDashboard() {
         const myUid = auth?.user?.id;
         if (!myUid) return;
 
-        // fetch unread notifications for this user
+        // only select conversation_id (avoid relying on donation_id column)
         const { data: notifs, error: notifsErr } = await supabase
           .from('notifications')
           .select('id, conversation_id, read')
@@ -465,40 +484,35 @@ export default function ReceiverDashboard() {
           .eq('read', false);
 
         if (notifsErr) {
-          console.error('loadUnread: notifications fetch error', notifsErr);
+          safeLogError('loadUnread: notifications fetch error', notifsErr);
           return;
         }
         if (!notifs || notifs.length === 0) {
-          setUnreadCounts({});
+          setUnreadListings({});
           return;
         }
 
-        // gather conversation ids present
+        // Resolve conversation -> donation mapping
         const convIds = Array.from(new Set(notifs.map((n: any) => n.conversation_id).filter(Boolean)));
-        if (convIds.length === 0) return;
+        const map: Record<string, boolean> = {};
 
-        // get conversation -> donation mapping
-        const { data: convs } = await supabase
-          .from('conversations')
-          .select('id, donation_id')
-          .in('id', convIds);
+        if (convIds.length > 0) {
+          const { data: convs, error: convErr } = await supabase
+            .from('conversations')
+            .select('id, donation_id')
+            .in('id', convIds);
+          if (convErr) {
+            safeLogError('conversations fetch error', convErr);
+          } else {
+            (convs || []).forEach((c: any) => {
+              if (c?.donation_id) map[String(c.donation_id)] = true;
+            });
+          }
+        }
 
-        const convToDonation: Record<string,string> = {};
-        convs?.forEach((c: any) => {
-          if (c && c.id && c.donation_id) convToDonation[String(c.id)] = String(c.donation_id);
-        });
-
-        const counts: Record<string, number> = {};
-        (notifs || []).forEach((n: any) => {
-          const donationId = convToDonation[String(n.conversation_id)];
-          if (!donationId) return;
-          counts[donationId] = (counts[donationId] || 0) + 1;
-        });
-
-        setUnreadCounts(counts);
-        console.log('Initial unreadCounts loaded:', counts);
+        setUnreadListings(map);
       } catch (e) {
-        console.error('initial unread fetch error', e);
+        safeLogError('initial unread fetch error', e);
       }
     })();
     // run once on mount
@@ -528,60 +542,38 @@ useEffect(() => {
           },
           async (payload: any) => {
             const n = payload.new;
-            if (!n) return;
+            // dedupe by notification id or fallback key
+            try {
+              const nid = String(n?.id ?? `${n?.conversation_id}-${n?.created_at}`);
+              if (processedNotifsRef.current.has(nid)) return;
+              processedNotifsRef.current.add(nid);
+            } catch { /* ignore dedupe failures */ }
 
-            // 🚫 Skip self-triggered notifications
-            if (n.sender_id && String(n.sender_id) === String(myUid)) {
-              console.log('Skipped self notification:', n);
-              return;
-            }
+            // toast once
+            try { toast({ title: 'New message', description: n?.preview ?? 'New message received' }); } catch {}
 
-            // ✅ Fetch unread count for that conversation freshly (accurate)
-            const { data: unreadNotifs, error: unreadErr } = await supabase
-              .from('notifications')
-              .select('id, conversation_id, read')
-              .eq('conversation_id', n.conversation_id)
-              .eq('user_id', myUid)
-              .eq('read', false);
-
-            if (unreadErr) {
-              console.error('Unread fetch error:', unreadErr);
-              return;
-            }
-
-            // Get conversation → donation mapping
-            const { data: conv } = await supabase
-              .from('conversations')
-              .select('donation_id')
-              .eq('id', n.conversation_id)
-              .maybeSingle();
-
-            if (!conv || !conv.donation_id) return;
-            const donationId = String(conv.donation_id);
-
-            const totalUnread = unreadNotifs?.length || 0;
-
-            // 🧮 Update badge count exactly
-            setUnreadCounts((prev) => ({
-              ...prev,
-              [donationId]: totalUnread,
-            }));
-
-            // 🔔 Optional: show toast
-            toast({
-              title: 'New message received',
-              description:
-                n.preview?.slice(0, 100) ||
-                n.message?.slice(0, 100) ||
-                'You have a new message',
-            });
-
-            console.log('Updated unreadCounts:', donationId, totalUnread);
+            // mark unread: prefer donation_id in payload
+            try {
+              if (n?.donation_id) {
+                setUnreadListings(prev => ({ ...prev, [String(n.donation_id)]: true }));
+                return;
+              }
+              if (!n?.conversation_id) return;
+              const { data: conv } = await supabase
+                .from('conversations')
+                .select('donation_id')
+                .eq('id', n.conversation_id)
+                .limit(1)
+                .maybeSingle();
+              if (conv?.donation_id) {
+                setUnreadListings(prev => ({ ...prev, [String(conv.donation_id)]: true }));
+              }
+            } catch { /* ignore */ }
           }
         )
         .subscribe();
     } catch (e) {
-      console.error('Realtime setup error:', e);
+      safeLogError('Realtime setup error', e);
     }
   })();
 
@@ -590,12 +582,11 @@ useEffect(() => {
       try {
         supabase.removeChannel(channelRef);
       } catch (e) {
-        console.debug('Error removing channel', e);
+        safeLogError('Error removing channel', e);
       }
     }
   };
 }, []);
-
 
   return (
     <div className="flex h-screen bg-background">
