@@ -38,7 +38,6 @@ export function DonateForm() {
   const [aiTags, setAiTags] = useState<string[]>([]);
   const [aiError, setAiError] = useState<string | null>(null);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [locLoading, setLocLoading] = useState(false);
   const [geoError, setGeoError] = useState<string | null>(null);
   const [geoLoading, setGeoLoading] = useState(false);
 // Forward geocoding using OpenStreetMap Nominatim
@@ -270,27 +269,27 @@ async function geocodeAddress(address: string): Promise<{ lat: number; lng: numb
           {/* Location */}
           <div className="space-y-2">
             <Label htmlFor="location">Your Location</Label>
-            <Textarea
-              id="location"
-              {...form.register('location', {
-                onBlur: async (e) => {
-                  const val = e.target.value;
-                  if (val && val.length > 5 && !/^\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/.test(val)) {
-                    setGeoLoading(true);
-                    setGeoError(null);
-                    const result = await geocodeAddress(val);
-                    setGeoLoading(false);
-                    if (result) {
-                      setCoords(result);
-                      toast({ title: 'Address resolved', description: `Found coordinates: ${result.lat.toFixed(5)}, ${result.lng.toFixed(5)}` });
-                    } else {
-                      setGeoError('Could not resolve address to coordinates.');
+              <Textarea
+                id="location"
+                {...form.register('location', {
+                  onBlur: async (e) => {
+                    const val = e.target.value;
+                    if (val && val.length > 5 && !/^\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/.test(val)) {
+                      setGeoLoading(true);
+                      setGeoError(null);
+                      const result = await geocodeAddress(val);
+                      setGeoLoading(false);
+                      if (result) {
+                        setCoords(result);
+                        toast({ title: 'Address resolved', description: `Found coordinates: ${result.lat.toFixed(5)}, ${result.lng.toFixed(5)}` });
+                      } else {
+                        setGeoError('Could not resolve address to coordinates.');
+                      }
                     }
-                  }
-                },
-              })}
-              placeholder="e.g., 123 Main St, Anytown"
-            />
+                  },
+                })}
+                placeholder="e.g., 123 Main St, Anytown"
+              />
             <div className="flex items-center gap-2 mt-2">
               <Button type="button" onClick={async () => {
                 if (!navigator.geolocation) {
@@ -302,6 +301,8 @@ async function geocodeAddress(address: string): Promise<{ lat: number; lng: numb
                   const lat = p.coords.latitude;
                   const lng = p.coords.longitude;
                   setCoords({ lat, lng });
+                  // optionally populate the free-text location field with coords
+                  form.setValue('location', `${lat.toFixed(5)}, ${lng.toFixed(5)}`);
                   setLocLoading(false);
                   toast({ title: 'Location captured', description: 'Using your current location for this donation.' });
                 }, (err) => {
@@ -311,9 +312,9 @@ async function geocodeAddress(address: string): Promise<{ lat: number; lng: numb
               }} disabled={locLoading}>
                 {locLoading ? 'Capturing…' : 'Use my current location'}
               </Button>
-              {coords && (<div className="text-sm text-muted-foreground">Using: {coords.lat.toFixed(5)}, {coords.lng.toFixed(5)}</div>)}
-              {geoLoading && (<div className="text-sm text-muted-foreground">Resolving address…</div>)}
-              {geoError && (<div className="text-sm text-destructive">{geoError}</div>)}
+                {coords && (<div className="text-sm text-muted-foreground">Using: {coords.lat.toFixed(5)}, {coords.lng.toFixed(5)}</div>)}
+                {geoLoading && (<div className="text-sm text-muted-foreground">Resolving address…</div>)}
+                {geoError && (<div className="text-sm text-destructive">{geoError}</div>)}
             </div>
             {form.formState.errors.location && <p className="text-sm text-destructive">{form.formState.errors.location.message}</p>}
           </div>

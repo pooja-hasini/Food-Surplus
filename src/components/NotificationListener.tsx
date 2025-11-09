@@ -26,12 +26,11 @@ export default function NotificationListener() {
             { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid}` },
             (payload: any) => {
               const n = payload.new;
+              // Only show notification if it was sent by someone else
+              if (n?.sender_id && String(n.sender_id) === String(uid)) return;
               toast({
-                title: 'New message',
-                description: n?.preview ?? 'New message received',
+                title: n?.preview ?? n?.message ?? 'New message',
               });
-              // Optional: navigate immediately when notification arrives:
-              // if (n?.conversation_id) router.push(`/chat/${n.conversation_id}`);
             }
           )
           .subscribe();

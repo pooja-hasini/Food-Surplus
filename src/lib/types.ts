@@ -1,4 +1,4 @@
-export type DonationStatus = 'pending' | 'taken';
+export type DonationStatus = 'pending' | 'taken' | 'completed' | "expired (Not accepted)";
 
 export interface Donation {
   id: string;

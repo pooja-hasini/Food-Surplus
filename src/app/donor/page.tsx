@@ -15,6 +15,8 @@ export default function DonorPage() {
   const [openingChat, setOpeningChat] = useState<string | null>(null);
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [convMap, setConvMap] = useState<Record<string, string>>({});
+  const [convStatusByDonation, setConvStatusByDonation] = useState<Record<string, any>>({});
+  const [systemNotifications, setSystemNotifications] = useState<Array<{id: string; message: string; donationId?: string}>>([]);
   const router = useRouter();
   const { toast } = useToast();
 
@@ -39,17 +41,20 @@ export default function DonorPage() {
 
       setDonations(donationsData || []);
 
-      // 2️⃣ Fetch all conversations for this donor’s donations
+      // 2️⃣ Fetch all conversations for this donor’s donations (include completion flags)
       const { data: convs } = await supabase
         .from("conversations")
-        .select("id, donation_id")
+        .select("id, donation_id, donor_complete, receiver_complete")
         .eq("donor_id", user.id);
 
       const map: Record<string, string> = {};
-      convs?.forEach((c) => {
+      const statusMap: Record<string, any> = {};
+      convs?.forEach((c: any) => {
         map[c.donation_id] = c.id;
+        statusMap[c.donation_id] = c;
       });
       setConvMap(map);
+      setConvStatusByDonation(statusMap);
 
       // 3️⃣ Fetch unread notifications count grouped by conversation
       const { data: notifs } = await supabase
@@ -90,13 +95,7 @@ export default function DonorPage() {
           // 🚫 Ignore notifications caused by my own message
           if (n.sender_id && n.sender_id === current) return;
 
-          // ✅ Show toast only for messages sent by the other user
-          toast({
-            title: 'New message',
-            description: n?.message ?? 'New message received',
-          });
-
-          // 🔢 Update unread count (optional if you have badge logic)
+          // Only update unread counts here. Global NotificationListener shows the toast with message content.
           setUnreadCounts(prev => ({
             ...prev,
             [n.conversation_id]: (prev[n.conversation_id] || 0) + 1,
@@ -111,6 +110,59 @@ export default function DonorPage() {
   };
 }, [toast]);
 
+  // subscribe to conversation updates so donor UI reflects completion quickly
+  useEffect(() => {
+    let convChannel: any = null;
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      const uid = data?.user?.id;
+      if (!uid) return;
+
+      convChannel = supabase
+        .channel(`conversations:user_id=${uid}`)
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'conversations' },
+          (payload: any) => {
+            const updated = payload.new;
+            if (!updated) return;
+            const donationId = updated.donation_id;
+            if (!donationId) return;
+
+            setConvStatusByDonation(prev => {
+              const prevEntry = prev[donationId];
+              const wasCompleted = prevEntry && prevEntry.donor_complete && prevEntry.receiver_complete;
+              const nowCompleted = updated.donor_complete && updated.receiver_complete;
+
+              // if it transitioned to completed, add an in-app persistent notification
+              if (!wasCompleted && nowCompleted) {
+                const id = `completed-${donationId}-${Date.now()}`;
+                setSystemNotifications(notifs => [
+                  ...notifs,
+                  { id, message: `Donation ${donationId} has been marked completed.`, donationId },
+                ]);
+                // also mark the listing status as completed
+                (async () => {
+                  try {
+                    await supabase.from('food_listings').update({ status: 'completed' }).eq('id', donationId);
+                  } catch (err) {
+                    console.debug('Failed to update listing status to completed', err);
+                  }
+                })();
+              }
+
+              return { ...prev, [donationId]: updated };
+            });
+          }
+        )
+        .subscribe();
+    })();
+
+    return () => {
+      if (convChannel) supabase.removeChannel(convChannel);
+    };
+  }, []);
+
   // 🗨️ Open chat
   const openChat = async (donationId: string) => {
     if (openingChat) return;
@@ -124,7 +176,31 @@ export default function DonorPage() {
         return;
       }
 
+      // Check conversation completion server-side to avoid stale UI state allowing chat for closed convs
+      const { data: serverConv } = await supabase
+        .from('conversations')
+        .select('id, donor_complete, receiver_complete')
+        .eq('donation_id', donationId)
+        .limit(1)
+        .maybeSingle();
+
+      if (serverConv && serverConv.donor_complete && serverConv.receiver_complete) {
+        toast({ title: 'Conversation closed', description: 'This donation has been completed.' });
+        setOpeningChat(null);
+        return;
+      }
+
+      // Use any existing mapping, but if the server has no conversation (e.g. it was deleted after completion),
+      // clear the stale mapping so we can create a fresh conversation when reopening.
       let convId = convMap[donationId];
+      if (!serverConv && convId) {
+        setConvMap(prev => {
+          const copy = { ...prev };
+          delete copy[donationId];
+          return copy;
+        });
+        convId = undefined as unknown as string;
+      }
 
       if (!convId) {
         // create conversation if not exists
@@ -185,6 +261,31 @@ export default function DonorPage() {
         </Button>
       </div>
 
+      {/* In-app persistent notifications (e.g., completed conversations) */}
+      {systemNotifications.length > 0 && (
+        <div className="mt-4 space-y-2">
+          {systemNotifications.map(n => (
+            <div key={n.id} className="flex items-center justify-between bg-amber-50 border-l-4 border-amber-400 p-3 rounded">
+              <div className="text-sm text-amber-800">{n.message}</div>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="ghost" onClick={async () => {
+                  // dismiss notification
+                  setSystemNotifications(prev => prev.filter(x => x.id !== n.id));
+                }}>
+                  Dismiss
+                </Button>
+                <Button size="sm" onClick={() => {
+                  // navigate to donation detail/chat if desired
+                  if (n.donationId) router.push(`/donor?donation=${n.donationId}`);
+                }}>
+                  View
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {loading ? (
         <div className="mt-8 text-center">Loading...</div>
       ) : donations.length === 0 ? (
@@ -231,13 +332,30 @@ export default function DonorPage() {
                   )}
                   <p className="mt-2 text-sm">
                     Status:{' '}
-                    <span className={donation.taken ? 'text-red-600' : 'text-yellow-600'}>
-                      {donation.taken ? 'Taken' : 'Pending'}
-                    </span>
+                    {donation.status ? (
+                      // show DB-driven status
+                      <span className={
+                        donation.status === 'completed' ? 'text-green-600' :
+                        donation.status === 'taken' ? 'text-red-600' :
+                        donation.status === 'expired (Not accepted)' ? 'text-red-600' :
+                        'text-yellow-600'
+                      }>
+                        {donation.status}
+                      </span>
+                    ) : (
+                      // fallback to conversation-completion or taken flag
+                      convStatusByDonation[donation.id] && convStatusByDonation[donation.id].donor_complete && convStatusByDonation[donation.id].receiver_complete ? (
+                        <span className="text-green-600">Completed</span>
+                      ) : (
+                        <span className={donation.taken ? 'text-red-600' : 'text-yellow-600'}>
+                          {donation.taken ? 'Taken' : 'Pending'}
+                        </span>
+                      )
+                    )}
                   </p>
                 </div>
 
-                {donation.taken && (
+                  {donation.taken && (
                   <div className="mt-4 flex flex-col gap-2 relative">
                     <Button
                       onClick={() => openChat(donation.id)}
@@ -247,13 +365,9 @@ export default function DonorPage() {
                       <MessageSquare className="mr-2 h-4 w-4" />
                       {openingChat === donation.id ? 'Opening Chat...' : 'Chat'}
                       {unreadCount > 0 && (
-                        <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
-                          {unreadCount}
-                        </span>
+                        <span className="absolute -top-2 -right-2 w-3 h-3 rounded-full bg-red-600" />
                       )}
                     </Button>
-
-                    {/* Complete button removed for donors - receivers mark completion */}
                   </div>
                 )}
               </div>

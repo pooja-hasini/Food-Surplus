@@ -219,13 +219,32 @@ export default function ChatPage() {
             return;
           }
 
-          await supabase.from('notifications').insert({
-            conversation_id: convId,
-            user_id: recipientId,
-            message: tempMsg.content,
-            read: false,
-            created_at: new Date().toISOString(),
-          });
+          // Prevent duplicate notifications: check if a very recent identical notification already exists
+          try {
+            const fiveSecondsAgo = new Date(Date.now() - 5000).toISOString();
+            const { data: existing } = await supabase
+              .from('notifications')
+              .select('id')
+              .eq('conversation_id', convId)
+              .eq('user_id', recipientId)
+              .eq('message', tempMsg.content)
+              .gte('created_at', fiveSecondsAgo)
+              .limit(1)
+              .maybeSingle();
+
+            if (!existing) {
+              await supabase.from('notifications').insert({
+                conversation_id: convId,
+                user_id: recipientId,
+                message: tempMsg.content,
+                sender_id: userId,
+                read: false,
+                created_at: new Date().toISOString(),
+              });
+            }
+          } catch (notifyErr) {
+            console.warn('Failed to create notification', notifyErr);
+          }
         } catch (notifyErr) {
           console.warn('Failed to create notification', notifyErr);
         }
@@ -239,32 +258,37 @@ export default function ChatPage() {
     }
   };
 
-  // Only the receiver may close the chat. When the receiver marks complete we immediately
-  // remove messages & conversation (one-sided closure). Donor actions are disabled.
   const toggleComplete = async (role: 'donor' | 'receiver') => {
-    if (role === 'donor') {
-      toast({ title: 'Action not allowed', description: 'Only the receiver can close this chat.' });
-      return;
-    }
-
+    if (!conversation) return;
     setUpdatingComplete(true);
     try {
-      // Mark receiver_complete so closed state persists across refreshes.
-      try {
-        await supabase.from('conversations').update({ receiver_complete: true }).eq('id', convId);
-      } catch (e) {
-        console.warn('Failed to set receiver_complete (continuing):', e);
-      }
+      const payload: any = {};
+      if (role === 'donor') payload.donor_complete = !conversation.donor_complete;
+      else payload.receiver_complete = !conversation.receiver_complete;
 
-      toast({ title: 'Chat closed', description: 'Conversation closed by receiver.' });
-      // navigate back to the returnTo param if present, otherwise go back
-      if (returnToParam) {
-        try { router.push(decodeURIComponent(returnToParam)); return; } catch(e) { /* fallthrough */ }
+      const { data: updated, error } = await supabase
+        .from('conversations')
+        .update(payload)
+        .eq('id', convId)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Complete update failed:', error);
+        toast({ title: 'Update failed', description: error.message });
+        return;
       }
-      router.back();
+      setConversation(updated);
+
+      if (updated.donor_complete && updated.receiver_complete) {
+        await supabase.from('chat_messages').delete().eq('conversation_id', convId);
+        await supabase.from('conversations').delete().eq('id', convId);
+        toast({ title: 'Chat completed', description: 'Conversation removed.' });
+        router.push('/');
+      }
     } catch (err: any) {
       console.error('Toggle complete error:', err);
-      toast({ title: 'Update failed', description: err?.message ?? 'Unable to close chat.' });
+      toast({ title: 'Update failed', description: err?.message ?? 'Unable to update.' });
     } finally {
       setUpdatingComplete(false);
     }
@@ -314,20 +338,7 @@ export default function ChatPage() {
               </p>
             </div>
           </div>
-          <div>
-            {/* Donor-side completion is intentionally removed. Only receiver can close the chat. */}
-            {userId && userId === conversation?.receiver_id && (
-              <Button
-                size="sm"
-                variant={conversation?.receiver_complete ? 'secondary' : 'outline'}
-                onClick={() => toggleComplete('receiver')}
-                disabled={updatingComplete}
-              >
-                <Check className="mr-2 h-4 w-4" />{' '}
-                {conversation?.receiver_complete ? 'Undo Complete' : 'Close Chat'}
-              </Button>
-            )}
-          </div>
+          {/* Donor-side 'Mark Complete' button removed as requested */}
         </div>
       </Card>
 

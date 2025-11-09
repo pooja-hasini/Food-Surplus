@@ -10,7 +10,7 @@ export default function ReceiverSignup() {
   const [message, setMessage] = useState("");
   const router = useRouter();
 
-  const handleSignup = async (e: React.FormEvent) => {
+const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage("");
 
@@ -20,22 +20,20 @@ export default function ReceiverSignup() {
       return;
     }
 
-    if (data.user) {
+    if (data?.user) {
+      try {
+        await supabase.from("profiles").insert([
+          { id: data.user.id, role: "receiver", mobile_number: mobileNumber },
+        ]);
+      } catch (e: any) {
+        console.error("Failed to insert profile:", e?.message || e);
+      }
+
       setMessage(
         "A verification email has been sent to your email address. Please verify before logging in."
       );
-
-      const { error: updateError } = await supabase
-        .from("profiles")
-        .update({ mobile_number: mobileNumber })
-        .eq("id", data.user.id);
-
-      if (updateError) {
-        console.error("Failed to update mobile number:", updateError);
-      }
-
-      // Optional redirect
-      // setTimeout(() => router.push("/login/receiver"), 5000);
+      // optional redirect after a short delay
+      // setTimeout(() => router.push('/login/receiver'), 4000);
     }
   };
 
@@ -54,6 +52,7 @@ export default function ReceiverSignup() {
           placeholder="Email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          suppressHydrationWarning
           className="w-full p-3 mb-4 border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 bg-white/90 text-foreground placeholder:text-muted-foreground transition"
         />
 
@@ -62,6 +61,7 @@ export default function ReceiverSignup() {
           placeholder="Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          suppressHydrationWarning
           className="w-full p-3 mb-4 border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 bg-white/90 text-foreground placeholder:text-muted-foreground transition"
         />
 
@@ -70,6 +70,7 @@ export default function ReceiverSignup() {
           placeholder="Mobile Number"
           value={mobileNumber}
           onChange={(e) => setMobileNumber(e.target.value)}
+          suppressHydrationWarning
           className="w-full p-3 mb-6 border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 bg-white/90 text-foreground placeholder:text-muted-foreground transition"
         />
 

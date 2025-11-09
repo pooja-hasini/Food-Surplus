@@ -4,7 +4,7 @@ import NotificationListener from './NotificationListener';
 
 type State = { error: Error | null };
 
-class ListenerErrorBoundary extends React.Component<{}, State> {
+class ListenerErrorBoundary extends React.Component<{ children?: React.ReactNode }, State> {
 	state: State = { error: null };
 
 	static getDerivedStateFromError(error: Error) {

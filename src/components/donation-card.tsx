@@ -11,8 +11,24 @@ interface DonationCardProps {
 }
 
 export function DonationCard({ donation, showLocation = false }: DonationCardProps) {
-  const getStatusVariant = (status: 'pending' | 'taken') => {
-    return status === 'pending' ? 'default' : 'secondary';
+  const getStatusVariant = (status?: string) => {
+    if (!status) return 'outline';
+    if (status === 'completed') return 'default';
+    if (status === 'taken') return 'destructive';
+    if (status.toLowerCase().startsWith('expired')) return 'destructive';
+    return 'outline';
+  };
+
+  const formatStatusText = (status?: string) => {
+    if (!status) return 'Pending';
+    if (status === 'completed') return 'Completed';
+    if (status === 'taken') return 'Taken';
+    if (status.toLowerCase().startsWith('expired')) return 'Expired';
+    // fallback: capitalize
+    return String(status)
+      .split(/\s+/)
+      .map(s => s.charAt(0).toUpperCase() + s.slice(1))
+      .join(' ');
   };
 
   const expiryText = formatDistanceToNow(donation.expiryTime, { addSuffix: true });
@@ -31,12 +47,13 @@ export function DonationCard({ donation, showLocation = false }: DonationCardPro
         </div>
       </CardHeader>
       <CardContent className="p-4">
-        <div className="flex items-start justify-between gap-2">
-            <CardTitle className="text-lg font-bold">{donation.foodName}</CardTitle>
-            <Badge variant={getStatusVariant(donation.status)} className="capitalize shrink-0">
-                {donation.status}
-            </Badge>
-        </div>
+    <div className="flex items-start justify-between gap-2">
+      <CardTitle className="text-lg font-bold">{donation.foodName}</CardTitle>
+      {/** derive status from DB status or legacy taken flag */}
+      <Badge variant={getStatusVariant(donation.status ?? 'pending')} className="capitalize shrink-0">
+        {formatStatusText(donation.status ?? 'pending')}
+      </Badge>
+    </div>
         <div className="mt-2 flex flex-wrap gap-1">
           {donation.tags.map(tag => (
             <Badge key={tag} variant="outline" className="text-xs">

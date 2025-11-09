@@ -16,6 +16,7 @@ import {
   AlertDialogAction,
 } from '@/components/ui/alert-dialog';
 import { Home, ShoppingBag, LogOut, X, Menu, MessageSquare } from 'lucide-react';
+import { Input } from '@/components/ui/input';
 // 🔔 Notification additions:
 import { useToast } from '@/hooks/use-toast';
 
@@ -30,7 +31,10 @@ export default function ReceiverDashboard() {
   const [currentView, setCurrentView] = useState<View>('home');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [selectedListing, setSelectedListing] = useState<any | null>(null);
+  const [claimQuantity, setClaimQuantity] = useState<number | ''>('');
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [showCompleteDialog, setShowCompleteDialog] = useState(false);
+  const [completeListing, setCompleteListing] = useState<any | null>(null);
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [address, setAddress] = useState<string | null>(null);
@@ -41,12 +45,7 @@ export default function ReceiverDashboard() {
   // if a `view` query param is present (e.g. returning from chat), set the view
   useEffect(() => {
     try {
-      let v = searchParams?.get('view');
-      // fallback for plain refresh where useSearchParams may be unavailable in SSR bailout
-      if (!v && typeof window !== 'undefined') {
-        const params = new URLSearchParams(window.location.search);
-        v = params.get('view');
-      }
+      const v = searchParams?.get('view');
       if (v === 'home' || v === 'taken' || v === 'detail') {
         setCurrentView(v as View);
       }
@@ -55,8 +54,8 @@ export default function ReceiverDashboard() {
 
   // 🔔 Notification additions - unread counts keyed by donation/listing id
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [conversationsByDonation, setConversationsByDonation] = useState<Record<string, any>>({});
   const { toast } = useToast();
-  const [completedIds, setCompletedIds] = useState<string[]>([]);
 
   // helper to create a short friendly address from reverse geocode result
   function extractShortAddress(reverseJson: any) {
@@ -118,10 +117,13 @@ export default function ReceiverDashboard() {
 
   const fetchAvailableListings = async () => {
     setLoading(true);
+    const nowIso = new Date().toISOString();
     const { data, error } = await supabase
       .from('food_listings')
       .select('*')
       .eq('taken', false)
+      .not('status', 'eq', 'expired (Not accepted)')
+      .gte('expiry_date', nowIso)
       .order('created_at', { ascending: false });
 
     if (error) console.error(error);
@@ -130,21 +132,20 @@ export default function ReceiverDashboard() {
       filtered = filtered.filter((listing: any) => {
         if (!listing.latitude || !listing.longitude) return false;
         const dist = getDistanceKm(location.lat, location.lng, listing.latitude, listing.longitude);
-        return dist <= 20;
+  return dist <= 15;
       });
     }
-    // attach conversation info (if any) to listings so UI can show 'Completed'
-    const ids = (filtered || []).map((l: any) => l.id).filter(Boolean);
-    if (ids.length > 0) {
-      const { data: convs } = await supabase
-        .from('conversations')
-        .select('id, donation_id, donor_complete, receiver_complete')
-        .in('donation_id', ids);
-      const convMap: Record<string, any> = {};
-      (convs || []).forEach((c: any) => { convMap[String(c.donation_id)] = c; });
-      filtered = (filtered || []).map((l: any) => ({ ...l, _conversation: convMap[String(l.id)] || null }));
-    }
     setAvailableListings(filtered);
+    // fetch conversations for these listings to know completion status
+    try {
+      const ids = (filtered || []).map((l: any) => l.id).filter(Boolean);
+      if (ids.length) {
+        const { data: convs } = await supabase.from('conversations').select('*').in('donation_id', ids);
+        const map: Record<string, any> = {};
+        convs?.forEach((c: any) => { if (c?.donation_id) map[c.donation_id] = c; });
+        setConversationsByDonation(prev => ({ ...prev, ...map }));
+      }
+    } catch (e) { console.debug('conv fetch err', e); }
     setLoading(false);
   };
 
@@ -241,25 +242,30 @@ export default function ReceiverDashboard() {
       .order('created_at', { ascending: false });
 
     if (error) console.error(error);
-    let listings = data || [];
-    const ids = listings.map((l: any) => l.id).filter(Boolean);
-    if (ids.length > 0) {
-      const { data: convs } = await supabase
-        .from('conversations')
-        .select('id, donation_id, donor_complete, receiver_complete')
-        .in('donation_id', ids);
-      const convMap: Record<string, any> = {};
-      (convs || []).forEach((c: any) => { convMap[String(c.donation_id)] = c; });
-      listings = listings.map((l: any) => ({ ...l, _conversation: convMap[String(l.id)] || null }));
-    }
-    setTakenListings(listings);
+    setTakenListings(data || []);
+    // fetch conversations for taken listings as well
+    try {
+      const ids = (data || []).map((l: any) => l.id).filter(Boolean);
+      if (ids.length) {
+        const { data: convs } = await supabase.from('conversations').select('*').in('donation_id', ids);
+        const map: Record<string, any> = {};
+        convs?.forEach((c: any) => { if (c?.donation_id) map[c.donation_id] = c; });
+        setConversationsByDonation(prev => ({ ...prev, ...map }));
+      }
+    } catch (e) { console.debug('conv fetch err', e); }
     setLoading(false);
   };
 
   useEffect(() => {
-    if (currentView === 'home') fetchAvailableListings();
-    else if (currentView === 'taken') fetchTakenListings();
+    if (currentView === 'home') {
+      // only fetch available listings once we have a location (live or stored)
+      if (location) fetchAvailableListings();
+      else setAvailableListings([]);
+    } else if (currentView === 'taken') {
+      fetchTakenListings();
+    }
   }, [currentView, location]);
+
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -268,35 +274,75 @@ export default function ReceiverDashboard() {
 
   const handleAcceptConfirm = async () => {
     if (!selectedListing) return;
+    // validate quantity
+    const maxQty = Number(selectedListing.quantity) || 0;
+    const q = typeof claimQuantity === 'number' ? claimQuantity : 0;
+    if (!q || q <= 0) {
+      alert('Please enter a valid quantity to claim.');
+      return;
+    }
+    if (maxQty > 0 && q > maxQty) {
+      alert(`Claim quantity cannot exceed listed quantity (${maxQty}).`);
+      return;
+    }
     const { data: userData } = await supabase.auth.getUser();
     const user = userData?.user;
     if (!user) return alert('Not logged in');
 
-    const { data, error } = await supabase
-      .from('food_listings')
-      .update({ taken: true, taken_by: user.id })
-      .eq('id', selectedListing.id)
-      .select();
+    // Call the server-side RPC which atomically handles partial claims and duplicate creation
+    try {
+      const { data: rpcData, error: rpcError } = await supabase.rpc('claim_listing', {
+        p_listing_id: selectedListing.id,
+        p_taker: user.id,
+        p_taken_qty: q,
+      });
 
-    if (error) {
-      alert('Update failed: ' + error.message);
+      if (rpcError) {
+        console.error('claim_listing RPC error', rpcError);
+        alert('Accept failed: ' + rpcError.message);
+        return;
+      }
+
+      // rpcData may be an array of rows returned by the function
+      const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+
+      // refresh listings to reflect changes
+      await fetchAvailableListings();
+      await fetchTakenListings();
+
+      // ensure the original listing status is set to 'taken'
+      try {
+        if (row && row.original_id) {
+          await supabase.from('food_listings').update({ status: 'taken' }).eq('id', row.original_id);
+        }
+        // if duplicate was created, make sure it's marked pending
+        if (row && row.duplicate_id) {
+          await supabase.from('food_listings').update({ status: 'pending' }).eq('id', row.duplicate_id);
+        }
+      } catch (e) {
+        console.debug('Failed to update status after claim RPC', e);
+      }
+
+      setShowConfirmDialog(false);
+      setSelectedListing(null);
+      setClaimQuantity('');
+      setCurrentView('taken');
+
+      if (row && row.duplicate_id) {
+        toast({ title: 'Partial claim', description: 'You claimed part of the listing. Remaining quantity returned to listings.' });
+      } else {
+        toast({ title: 'Claimed', description: 'You claimed the item.' });
+      }
+    } catch (e: any) {
+      console.error('Accept RPC error', e);
+      alert('Accept failed: ' + (e?.message ?? e));
       return;
     }
-
-  setShowConfirmDialog(false);
-  setSelectedListing(null);
-  navigateToView('taken');
   };
 
   const navigateToView = (view: View) => {
     setCurrentView(view);
     setSelectedListing(null);
-    try {
-      // update URL so refresh preserves current view
-      router.replace(`/receiver?view=${view}`);
-    } catch (e) {
-      // ignore router errors
-    }
   };
 
   // helper to clear unread when chat opens
@@ -323,9 +369,6 @@ export default function ReceiverDashboard() {
 
   // open or create conversation for a listing, then navigate to chat page
   const openChat = async (listing: any) => {
-    if (completedIds.includes(String(listing.id))) return alert('This conversation has been completed and is closed.');
-    // immediate in-memory guard: if listing._completed or persisted completed flag is set we block right away
-    if (listing?._completed || listing?.completed || completedIds.includes(String(listing.id))) return alert('This conversation has been completed and is closed.');
     const { data: userData } = await supabase.auth.getUser();
     const me = userData?.user;
     if (!me) return alert('You must be signed in to chat.');
@@ -341,6 +384,12 @@ export default function ReceiverDashboard() {
 
       if (findErr) console.debug('conversation find err', findErr);
       let conv = existing;
+
+      // if conversation exists and is already completed, don't allow chat
+      if (conv && conv.donor_complete && conv.receiver_complete) {
+        alert('This conversation is closed — the donation has been completed.');
+        return;
+      }
 
       if (!conv) {
         // best-effort donor id from listing (depends on your schema)
@@ -363,10 +412,6 @@ export default function ReceiverDashboard() {
       }
 
       if (conv?.id) {
-        // if conversation already marked completed by both parties, prevent opening
-        if (conv.donor_complete && conv.receiver_complete) {
-          return alert('This conversation has been completed and is closed.');
-        }
         // 🔔 mark notifications read for this conversation and clear badge for this donation
         await clearUnread(conv.id, listing.id);
         // include a returnTo param so chat can navigate back to the correct view
@@ -381,32 +426,50 @@ export default function ReceiverDashboard() {
     }
   };
 
-  // Receiver marks an accepted item as completed. This will set receiver_complete on the conversation,
-  // and if both parties have marked complete, delete the conversation/messages to close the chat.
-  const handleComplete = async (listing: any) => {
+  const handleMarkComplete = async (listing: any) => {
+    // find conversation for this listing
     try {
-      // call server endpoint which will delete conversation/messages and mark the listing.completed flag (if supported)
-      const res = await fetch('/api/close-listing', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ listingId: listing.id }),
-      });
-      if (!res.ok) {
-        console.warn('close-listing API returned error', await res.text());
-        // fall back to best-effort client-side cleanup
+      const { data: conv } = await supabase
+        .from('conversations')
+        .select('*')
+        .eq('donation_id', listing.id)
+        .limit(1)
+        .maybeSingle();
+
+      if (!conv || !conv.id) {
+        alert('No conversation found for this listing.');
+        return;
       }
 
-      // mark completed locally so UI shows 'Completed' and prevent reopening
-      setCompletedIds(prev => Array.from(new Set([...prev, String(listing.id)])));
-      toast({ title: 'Completed', description: 'Item marked completed and chat closed.' });
+      const { error } = await supabase
+        .from('conversations')
+        .update({ donor_complete: true, receiver_complete: true })
+        .eq('id', conv.id);
 
-      // update local listings to reflect closed conversation
-      const applyRemoveConvToList = (arr: any[]) => arr.map((l: any) => l.id === listing.id ? { ...l, _conversation: null, _completed: true, completed: true } : l);
-      setAvailableListings(prev => applyRemoveConvToList(prev));
-      setTakenListings(prev => applyRemoveConvToList(prev));
+      if (error) {
+        console.error('complete update error', error);
+        alert('Failed to mark complete.');
+        return;
+      }
+
+      // mark the listing as completed as well (some schemas use `completed` column)
+      try {
+        await supabase
+          .from('food_listings')
+          .update({ completed: true, status: 'completed' })
+          .eq('id', listing.id);
+      } catch (e) {
+        console.debug('failed to mark listing.completed (maybe column missing)', e);
+      }
+
+      // update local map and refresh listings
+      setConversationsByDonation(prev => ({ ...prev, [listing.id]: { ...prev[listing.id], donor_complete: true, receiver_complete: true } }));
+      fetchTakenListings();
+      fetchAvailableListings();
+      alert('Marked as completed — chat closed.');
     } catch (e) {
-      console.error('handleComplete error', e);
-      alert('Unable to complete at this time.');
+      console.error('handleMarkComplete error', e);
+      alert('Failed to mark complete.');
     }
   };
 
@@ -433,20 +496,35 @@ export default function ReceiverDashboard() {
                 <p><span className="font-semibold">Location:</span> {selectedListing.location}</p>
                 <p><span className="font-semibold">Expiry Date:</span> {selectedListing.expiry_date ? new Date(selectedListing.expiry_date).toLocaleDateString() : '—'}</p>
               </div>
+              {/* Receiver claim quantity input */}
+              <div className="mt-4">
+                <label className="block text-sm font-medium text-muted-foreground mb-2">Quantity to claim</label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={selectedListing.quantity}
+                    value={claimQuantity === '' ? '' : claimQuantity}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '') return setClaimQuantity('');
+                      const n = parseInt(v, 10);
+                      if (Number.isNaN(n)) return setClaimQuantity('');
+                      setClaimQuantity(n);
+                    }}
+                    className="w-32"
+                    placeholder={String(selectedListing.quantity || 1)}
+                  />
+                  <div className="text-sm text-muted-foreground">of {selectedListing.quantity}</div>
+                </div>
+                {claimQuantity !== '' && typeof claimQuantity === 'number' && claimQuantity > selectedListing.quantity && (
+                  <div className="text-sm text-red-600 mt-2">Claim quantity cannot exceed listed quantity.</div>
+                )}
+              </div>
             </CardContent>
             <CardFooter>
-              <div className="w-full grid grid-cols-2 gap-2">
+              <div className="w-full grid grid-cols-1 gap-2">
                 <Button onClick={() => setShowConfirmDialog(true)}>Accept This Item</Button>
-                <div className="relative w-full">
-                  <Button variant="ghost" onClick={() => openChat(selectedListing)} disabled={selectedListing?._completed || completedIds.includes(String(selectedListing?.id))}>
-                    <MessageSquare className="mr-2 h-4 w-4" /> {selectedListing?._completed || completedIds.includes(String(selectedListing?.id)) ? 'Closed' : 'Chat'}
-                  </Button>
-                  { !selectedListing?._completed && (unreadCounts[selectedListing.id] || 0) > 0 && (
-                    <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
-                      {unreadCounts[selectedListing.id]}
-                    </span>
-                  )}
-                </div>
               </div>
             </CardFooter>
           </Card>
@@ -501,33 +579,38 @@ export default function ReceiverDashboard() {
                   <p><span className="font-semibold">Quantity:</span> {listing.quantity}</p>
                   <p><span className="font-semibold">Expiry:</span> {listing.expiry_date ? new Date(listing.expiry_date).toLocaleDateString() : '—'}</p>
                 </div>
-                {listing.taken && (() => {
-                  const isCompleted = completedIds.includes(String(listing.id)) || listing._completed || listing.completed || (listing._conversation && listing._conversation.donor_complete && listing._conversation.receiver_complete);
-                  return (
-                    <p className={`font-bold mt-2 ${isCompleted ? 'text-green-600' : 'text-red-600'}`}>
-                      Status: {isCompleted ? 'Completed' : 'Taken'}
-                    </p>
-                  );
-                })()}
+                {/* Prefer the DB `status` when available, fallback to `taken` flag */}
+                { (listing.status ? (
+                  <p className="font-bold mt-2">Status: <span className={
+                    listing.status === 'completed' ? 'text-green-600' :
+                    listing.status === 'taken' ? 'text-red-600' :
+                    listing.status === 'expired (Not accepted)' ? 'text-red-600' :
+                    'text-yellow-600'
+                  }>{listing.status}</span></p>
+                ) : (
+                  listing.taken ? <p className="font-bold text-red-600 mt-2">Status: Taken</p> : null
+                ))}
               </CardContent>
               <CardFooter className="flex flex-col items-start gap-2 pt-4">
                 {currentView === 'home' ? (
-                  <Button className="w-full" onClick={() => { setSelectedListing(listing); navigateToView('detail'); }}>
+                  <Button className="w-full" onClick={() => { setSelectedListing(listing); setClaimQuantity(listing.quantity ?? ''); setCurrentView('detail'); }}>
                     View & Accept
                   </Button>
-                ) : (
+                  ) : (
                   <div className="w-full flex flex-col gap-2">
                     <div className="relative w-full">
-                      <Button className="w-full" onClick={() => openChat(listing)} disabled={listing?._completed || completedIds.includes(String(listing?.id))}>
-                        <MessageSquare className="mr-2 h-4 w-4" /> {listing?._completed || completedIds.includes(String(listing?.id)) ? 'Closed' : 'Chat'}
+                      <Button className="w-full" onClick={() => openChat(listing)}>
+                        <MessageSquare className="mr-2 h-4 w-4" /> Chat
                       </Button>
-                      { !listing._completed && (unreadCounts[listing.id] || 0) > 0 && (
-                        <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
-                          {unreadCounts[listing.id]}
-                        </span>
+                      { (unreadCounts[listing.id] || 0) > 0 && (
+                        <span className="absolute -top-2 -right-2 w-3 h-3 rounded-full bg-red-600" />
                       )}
                     </div>
-                    <Button className="w-full" variant="secondary" onClick={() => handleComplete(listing)}>Complete</Button>
+                    {conversationsByDonation[listing.id] && conversationsByDonation[listing.id].donor_complete && conversationsByDonation[listing.id].receiver_complete ? (
+                      <Button className="w-full" variant="secondary" disabled>Completed</Button>
+                    ) : (
+                      <Button className="w-full" variant="secondary" onClick={() => { setCompleteListing(listing); setShowCompleteDialog(true); }}>Complete</Button>
+                    )}
                   </div>
                 )}
               </CardFooter>
@@ -545,51 +628,54 @@ useEffect(() => {
     const me = userData?.user;
     if (!me) return;
 
-    // subscribe to new chat messages
+    // First, load existing unread notifications for this user and map them to donation ids
+    try {
+      const { data: notifs } = await supabase
+        .from('notifications')
+        .select('conversation_id')
+        .eq('user_id', me.id)
+        .eq('read', false);
+
+      const convIds = Array.from(new Set((notifs || []).map((n: any) => n.conversation_id).filter(Boolean)));
+      if (convIds.length) {
+        const { data: convs } = await supabase
+          .from('conversations')
+          .select('id, donation_id')
+          .in('id', convIds as any[]);
+        const convMapLocal: Record<string, string> = {};
+        (convs || []).forEach((c: any) => { if (c?.id && c?.donation_id) convMapLocal[c.id] = String(c.donation_id); });
+
+        const counts: Record<string, number> = {};
+        (notifs || []).forEach((n: any) => {
+          const did = convMapLocal[n.conversation_id];
+          if (did) counts[did] = (counts[did] || 0) + 1;
+        });
+        setUnreadCounts(counts);
+      }
+    } catch (e) {
+      console.debug('failed to load unread notifications', e);
+    }
+
+    // subscribe to notifications inserts for this receiver to update unreadCounts in realtime
     const channel = supabase
       .channel('receiver-notifications')
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'chat_messages' },
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${me.id}` },
         async (payload) => {
-          const newMsg = payload.new;
-          if (!newMsg) return;
-
-          // find conversation info
-          const { data: conv } = await supabase
-            .from('conversations')
-            .select('donor_id, receiver_id, donation_id')
-            .eq('id', newMsg.conversation_id)
-            .maybeSingle();
-
-          if (!conv) return;
-
-          // ✅ Only trigger if the receiver is the target and not the sender
-          if (conv.receiver_id === me.id && newMsg.sender_id !== me.id) {
-            toast({
-              title: 'New message received',
-              description: newMsg.content?.slice(0, 60) || 'You have a new message',
-            });
-
-            setUnreadCounts(prev => {
-  if (!conv?.donation_id) return prev;
-  const donationId = String(conv.donation_id);
-  const updated = {
-    ...prev,
-    [donationId]: (prev[donationId] || 0) + 1,
-  };
-  console.log("🔔 Updated unreadCounts:", updated);
-  return updated;
-});
-
-            console.log('🔔 Realtime new msg received for donation:', conv.donation_id);
-console.log('Before update:', unreadCounts);
-console.log('After update:', {
-  ...unreadCounts,
-  [conv.donation_id]: (unreadCounts[conv.donation_id] || 0) + 1,
-});
-
-          }
+          const n = payload.new;
+          if (!n || !n.conversation_id) return;
+          try {
+            const { data: conv } = await supabase
+              .from('conversations')
+              .select('donation_id')
+              .eq('id', n.conversation_id)
+              .limit(1)
+              .maybeSingle();
+            if (!conv || !conv.donation_id) return;
+            const donationId = String(conv.donation_id);
+            setUnreadCounts(prev => ({ ...prev, [donationId]: (prev[donationId] || 0) + 1 }));
+          } catch (e) { console.debug('notif subscribe conv lookup failed', e); }
         }
       )
       .subscribe();
@@ -648,6 +734,29 @@ console.log('After update:', {
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
               <AlertDialogAction onClick={handleAcceptConfirm}>Yes, Accept</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
+      {completeListing && (
+        <AlertDialog open={showCompleteDialog} onOpenChange={setShowCompleteDialog}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Confirm completion</AlertDialogTitle>
+              <AlertDialogDescription>
+                Do you want to mark this donation <span className="font-semibold">{completeListing.food_name}</span> as completed? This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel onClick={() => { setShowCompleteDialog(false); setCompleteListing(null); }}>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={async () => {
+                setShowCompleteDialog(false);
+                try {
+                  await handleMarkComplete(completeListing);
+                } finally {
+                  setCompleteListing(null);
+                }
+              }}>Yes, Mark Complete</AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
