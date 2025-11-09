@@ -15,7 +15,7 @@ import {
   AlertDialogCancel,
   AlertDialogAction,
 } from '@/components/ui/alert-dialog';
-import { Home, ShoppingBag, LogOut, X, Menu, MessageSquare } from 'lucide-react';
+import { Home, ShoppingBag, LogOut, X, Menu, MessageSquare, Eye, EyeOff } from 'lucide-react';
 // Notification/toast hook (you already have this)
 import { useToast } from '@/hooks/use-toast';
 
@@ -36,6 +36,7 @@ export default function ReceiverDashboard() {
   const [address, setAddress] = useState<string | null>(null);
   const [isStoredLocation, setIsStoredLocation] = useState<boolean>(false);
   const [unreadListings, setUnreadListings] = useState<Record<string, boolean>>({});
+  const [showPassword, setShowPassword] = useState(false);
   const notifRef = React.useRef<any>(null);
   const processedNotifsRef = React.useRef<Set<string>>(new Set());
   const { toast } = useToast();

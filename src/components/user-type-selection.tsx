@@ -16,7 +16,7 @@ export function UserTypeSelection() {
       <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ delay: 0.2, type: 'spring' }}>
         <HandHeart className="mx-auto h-20 w-20 text-primary" />
         <h1 className="mt-4 text-5xl font-bold tracking-tight text-primary-foreground">
-          Welcome to FoodBridge
+          Welcome to ReFeed
         </h1>
         <p className="mt-4 text-lg text-muted-foreground">
           Connecting surplus food with those who need it most.
