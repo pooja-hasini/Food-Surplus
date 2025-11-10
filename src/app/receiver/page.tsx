@@ -53,7 +53,9 @@ export default function ReceiverDashboard() {
   }, [searchParams]);
 
   // 🔔 Notification additions - unread counts keyed by donation/listing id
-  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  // track whether a donation has any unread notifications (boolean) and unread counts by conversation
+  const [unreadExistsByDonation, setUnreadExistsByDonation] = useState<Record<string, boolean>>({});
+  const [unreadByConversation, setUnreadByConversation] = useState<Record<string, number>>({});
   const [conversationsByDonation, setConversationsByDonation] = useState<Record<string, any>>({});
   const { toast } = useToast();
 
@@ -228,6 +230,40 @@ export default function ReceiverDashboard() {
     if (!location) handleLocation();
   }, []);
 
+  // Manage Back button behavior for receiver views:
+  // - If on 'home', Back should keep the user on the home page (no navigation away)
+  // - If on 'taken', Back should navigate to the 'home' view
+  useEffect(() => {
+    const handlePop = (event: PopStateEvent) => {
+      try {
+        if (window.location.pathname.startsWith('/receiver')) {
+          if (currentView === 'home') {
+            // re-push current URL so the user stays on home
+            window.history.pushState(null, '', window.location.href);
+          } else if (currentView === 'taken') {
+            // navigate to home view within the receiver page
+            setCurrentView('home');
+            // ensure history reflects the new view
+            const newUrl = `/receiver?view=home`;
+            window.history.pushState(null, '', newUrl);
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    if (typeof window !== 'undefined') {
+      // create an initial history entry to allow popstate handling
+      window.history.pushState(null, '', window.location.href);
+      window.addEventListener('popstate', handlePop);
+    }
+
+    return () => {
+      if (typeof window !== 'undefined') window.removeEventListener('popstate', handlePop);
+    };
+  }, [currentView]);
+
   const fetchTakenListings = async () => {
     setLoading(true);
     const { data: userData } = await supabase.auth.getUser();
@@ -254,6 +290,26 @@ export default function ReceiverDashboard() {
       }
     } catch (e) { console.debug('conv fetch err', e); }
     setLoading(false);
+  };
+
+  // helper to refresh conversations for currently displayed listings (both available and taken)
+  const refreshConversationsForDisplayedListings = async () => {
+    try {
+      const ids = [
+        ...(availableListings || []).map((l: any) => l.id).filter(Boolean),
+        ...(takenListings || []).map((l: any) => l.id).filter(Boolean),
+      ];
+      const uniq = Array.from(new Set(ids));
+      if (!uniq.length) return [];
+      const { data: convs } = await supabase.from('conversations').select('*').in('donation_id', uniq);
+      const map: Record<string, any> = {};
+      (convs || []).forEach((c: any) => { if (c?.donation_id) map[c.donation_id] = c; });
+      setConversationsByDonation(prev => ({ ...prev, ...map }));
+      return convs || [];
+    } catch (e) {
+      console.debug('refresh convs failed', e);
+      return [];
+    }
   };
 
   useEffect(() => {
@@ -359,11 +415,19 @@ export default function ReceiverDashboard() {
         .eq('user_id', uid);
     }
     if (donationId) {
-      setUnreadCounts(prev => {
+      setUnreadExistsByDonation(prev => {
         const updated = { ...prev };
         delete updated[donationId];
         return updated;
       });
+      // also remove any conversation-level unread for this conversation
+      if (conversationId) {
+        setUnreadByConversation(prev => {
+          const copy = { ...prev };
+          delete copy[String(conversationId)];
+          return copy;
+        });
+      }
     }
   };
 
@@ -414,9 +478,9 @@ export default function ReceiverDashboard() {
       if (conv?.id) {
         // 🔔 mark notifications read for this conversation and clear badge for this donation
         await clearUnread(conv.id, listing.id);
-        // include a returnTo param so chat can navigate back to the correct view
-        const returnTo = encodeURIComponent(`/receiver?view=${currentView}`);
-        router.push(`/chat/${conv.id}?returnTo=${returnTo}`);
+    // include a returnTo param so chat Back always returns to the Taken Items view
+    const returnTo = encodeURIComponent(`/receiver?view=taken`);
+    router.push(`/chat/${conv.id}?returnTo=${returnTo}`);
       } else {
         alert('Conversation not available.');
       }
@@ -602,7 +666,7 @@ export default function ReceiverDashboard() {
                       <Button className="w-full" onClick={() => openChat(listing)}>
                         <MessageSquare className="mr-2 h-4 w-4" /> Chat
                       </Button>
-                      { (unreadCounts[listing.id] || 0) > 0 && (
+                      { (unreadExistsByDonation[listing.id] || (conversationsByDonation[listing.id]?.id && Boolean(unreadByConversation[conversationsByDonation[listing.id].id]))) && (
                         <span className="absolute -top-2 -right-2 w-3 h-3 rounded-full bg-red-600" />
                       )}
                     </div>
@@ -635,8 +699,14 @@ useEffect(() => {
         .select('conversation_id')
         .eq('user_id', me.id)
         .eq('read', false);
-
       const convIds = Array.from(new Set((notifs || []).map((n: any) => n.conversation_id).filter(Boolean)));
+      // counts keyed by conversation id (for direct lookups)
+      const convCounts: Record<string, number> = {};
+      (notifs || []).forEach((n: any) => {
+        if (n?.conversation_id) convCounts[String(n.conversation_id)] = (convCounts[String(n.conversation_id)] || 0) + 1;
+      });
+      setUnreadByConversation(convCounts);
+
       if (convIds.length) {
         const { data: convs } = await supabase
           .from('conversations')
@@ -645,12 +715,12 @@ useEffect(() => {
         const convMapLocal: Record<string, string> = {};
         (convs || []).forEach((c: any) => { if (c?.id && c?.donation_id) convMapLocal[c.id] = String(c.donation_id); });
 
-        const counts: Record<string, number> = {};
+        const exists: Record<string, boolean> = {};
         (notifs || []).forEach((n: any) => {
           const did = convMapLocal[n.conversation_id];
-          if (did) counts[did] = (counts[did] || 0) + 1;
+          if (did) exists[did] = true;
         });
-        setUnreadCounts(counts);
+        setUnreadExistsByDonation(exists);
       }
     } catch (e) {
       console.debug('failed to load unread notifications', e);
@@ -666,15 +736,27 @@ useEffect(() => {
           const n = payload.new;
           if (!n || !n.conversation_id) return;
           try {
+
+            // increment unread count keyed by conversation id
+            setUnreadByConversation(prev => ({ ...prev, [String(n.conversation_id)]: (prev[String(n.conversation_id)] || 0) + 1 }));
+
             const { data: conv } = await supabase
               .from('conversations')
               .select('donation_id')
               .eq('id', n.conversation_id)
               .limit(1)
               .maybeSingle();
-            if (!conv || !conv.donation_id) return;
-            const donationId = String(conv.donation_id);
-            setUnreadCounts(prev => ({ ...prev, [donationId]: (prev[donationId] || 0) + 1 }));
+            let donationId: string | null = null;
+            if (conv && conv.donation_id) {
+              donationId = String(conv.donation_id);
+            } else {
+              // possible race: conversation not yet present in local map. Refresh conversations for displayed listings and try to find mapping.
+              const convs = await refreshConversationsForDisplayedListings();
+              const found = (convs || []).find((c: any) => String(c.id) === String(n.conversation_id));
+              if (found && found.donation_id) donationId = String(found.donation_id);
+            }
+
+            if (donationId) setUnreadExistsByDonation(prev => ({ ...prev, [donationId]: true }));
           } catch (e) { console.debug('notif subscribe conv lookup failed', e); }
         }
       )

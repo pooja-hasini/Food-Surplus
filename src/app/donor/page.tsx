@@ -75,6 +75,31 @@ export default function DonorPage() {
     fetchData();
   }, []);
 
+  // Keep user on donor home when pressing browser Back while on this page.
+  // This traps the back button to stay on /donor as requested.
+  useEffect(() => {
+    const handlePop = () => {
+      try {
+        if (typeof window !== 'undefined' && window.location.pathname === '/donor') {
+          // re-push the same state so the user stays on this page
+          window.history.pushState(null, '', window.location.href);
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    if (typeof window !== 'undefined') {
+      // ensure there's a history entry we can re-push
+      window.history.pushState(null, '', window.location.href);
+      window.addEventListener('popstate', handlePop);
+    }
+
+    return () => {
+      if (typeof window !== 'undefined') window.removeEventListener('popstate', handlePop);
+    };
+  }, []);
+
   // 🔁 Realtime subscription for new notifications
   useEffect(() => {
   let channel: any = null;
@@ -237,7 +262,8 @@ export default function DonorPage() {
         return updated;
       });
 
-      router.push(`/chat/${convId}`);
+  // ensure chat back button returns to donor home
+  router.push(`/chat/${convId}?returnTo=${encodeURIComponent('/donor')}`);
     } catch (err) {
       console.error(err);
       toast({ title: 'Error', description: 'Failed to open chat.' });
